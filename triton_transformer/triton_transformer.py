@@ -35,7 +35,6 @@ class Attention(nn.Module):
         sim = einsum('b i d, b j d -> b i j', q, k)
 
         if mask is not None:
-            mask = rearrange(mask, 'b i -> b i ()') * rearrange(mask, 'b j -> b () j')
             mask_value = -torch.finfo(sim.dtype).max
             sim = sim.masked_fill(mask, mask_value)
 
@@ -62,6 +61,7 @@ class Transformer(nn.Module):
         num_tokens,
         max_seq_len,
         depth,
+        causal = False,
         heads = 8,
         dim_head = 64
     ):
@@ -81,12 +81,31 @@ class Transformer(nn.Module):
             nn.Linear(dim, num_tokens)
         )
 
+        # mask
+
+        self.causal = causal
+        mask = torch.ones(max_seq_len, max_seq_len, dtype = torch.bool).triu(1) if causal else None
+        self.register_buffer('mask', mask, persistent = False)
+
     def forward(self, x, mask = None):
         n, device = x.shape[1], x.device
+
+        # embed token and add positional embedding
 
         x = self.token_emb(x)
         pos_emb = self.pos_emb(torch.arange(n, device = device))
         x = x + rearrange(pos_emb, 'n d -> () n d')
+
+        # generate mask, depending on whether autoregressive or not
+
+        if self.causal:
+            mask = self.mask[:n, :n]
+            mask = rearrange(mask, 'i j -> () i j')
+        elif mask is not None:
+            mask = rearrange(mask, 'b i -> b i ()') * rearrange(mask, 'b j -> b () j')
+            mask = ~mask
+
+        # go through layers
 
         for attn, ff in self.layers:
             x = attn(x, mask = mask) + x
