@@ -6,6 +6,9 @@ from einops import rearrange
 import triton
 import triton.language as tl
 
+# triton substitutes
+
+
 # helpers classes
 
 class Attention(nn.Module):
@@ -63,7 +66,8 @@ class Transformer(nn.Module):
         depth,
         causal = False,
         heads = 8,
-        dim_head = 64
+        dim_head = 64,
+        use_triton = False
     ):
         super().__init__()
         self.token_emb = nn.Embedding(num_tokens, dim)
@@ -83,11 +87,13 @@ class Transformer(nn.Module):
 
         # mask
 
+        self.use_triton = use_triton
         self.causal = causal
         mask = torch.ones(max_seq_len, max_seq_len, dtype = torch.bool).triu(1) if causal else None
         self.register_buffer('mask', mask, persistent = False)
 
-    def forward(self, x, mask = None):
+    def forward(self, x, mask = None, use_triton = None):
+        use_triton = self.use_triton if use_triton is None else use_triton
         n, device = x.shape[1], x.device
 
         # embed token and add positional embedding
