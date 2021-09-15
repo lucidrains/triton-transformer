@@ -24,7 +24,7 @@ class Attention(nn.Module):
         self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
         self.to_out = nn.Linear(inner_dim, dim)
 
-    def forward(self, x):
+    def forward(self, x, mask = None):
         h = self.heads
         x = self.norm(x)
 
@@ -33,6 +33,12 @@ class Attention(nn.Module):
 
         q = q * self.scale
         sim = einsum('b i d, b j d -> b i j', q, k)
+
+        if mask is not None:
+            mask = rearrange(mask, 'b i -> b i ()') * rearrange(mask, 'b j -> b () j')
+            mask_value = -torch.finfo(sim.dtype).max
+            sim = sim.masked_fill(mask, mask_value)
+
         attn = sim.softmax(dim = -1)
         out = einsum('b i j, b j d -> b i d', attn, v)
         out = rearrange(out, '(b h) n d -> b n (h d)', h = h)
@@ -75,16 +81,15 @@ class Transformer(nn.Module):
             nn.Linear(dim, num_tokens)
         )
 
-    def forward(self, x):
+    def forward(self, x, mask = None):
         n, device = x.shape[1], x.device
 
         x = self.token_emb(x)
-
-        for attn, ff in self.layers:
-            x = attn(x) + x
-            x = ff(x) + x
-
         pos_emb = self.pos_emb(torch.arange(n, device = device))
         x = x + rearrange(pos_emb, 'n d -> () n d')
+
+        for attn, ff in self.layers:
+            x = attn(x, mask = mask) + x
+            x = ff(x) + x
 
         return self.to_logits(x)

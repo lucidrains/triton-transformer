@@ -2,6 +2,33 @@
 
 Implementation of a Transformer, but completely in <a href="https://triton-lang.org/">Triton</a>. I'm completely new to lower-level neural net code, so this repository will mostly be a learning experience, with the end-goal being a vanilla transformer that is faster and more efficient to train.
 
+## Install
+
+```bash
+$ pip install triton-transformer
+```
+
+## Usage
+
+```python
+import torch
+from triton_transformer import Transformer
+
+model = Transformer(
+    num_tokens = 256,
+    max_seq_len = 1024,
+    dim = 512,
+    depth = 6,
+    heads = 8,
+    dim_head = 64
+)
+
+x = torch.randint(0, 256, (1, 1024))
+mask = torch.ones(1, 1024).bool()
+
+logits = model(x, mask = mask) # (1, 1024, 256)
+```
+
 ## Citations
 
 ```bibtex
