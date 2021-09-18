@@ -70,6 +70,7 @@ class Transformer(nn.Module):
         use_triton = False
     ):
         super().__init__()
+        self.max_seq_len = max_seq_len
         self.token_emb = nn.Embedding(num_tokens, dim)
         self.pos_emb = nn.Embedding(max_seq_len, dim)
 
