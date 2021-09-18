@@ -17,27 +17,28 @@ model = Transformer(
 ).cuda()
 
 x = torch.randint(0, 256, (1, 1024)).cuda()
+labels = torch.randint(0, 256, (1, 1024)).cuda()
 
 # forward and backward pass without triton
 
-logits = model(x)
-logits.sum().backward()
+loss = model(x, labels = labels)
+loss.backward()
 
-logits = logits.clone()
+loss = loss.clone()
 emb_grad = model.token_emb.weight.grad.clone()
 
 model.zero_grad()
 
 # forward and backward pass with triton
 
-triton_logits = model(x, use_triton = True)
-triton_logits.sum().backward()
+triton_loss = model(x, labels = labels, use_triton = True)
+triton_loss.backward()
 
 triton_emb_grad = model.token_emb.weight.grad.clone()
 
 # should be equal, for output and gradients on token embeddings
 
-assert torch.allclose(logits.cpu(), triton_logits.cpu()), 'output is the same'
+assert torch.allclose(loss.cpu(), triton_loss.cpu()), 'output is the same'
 assert torch.allclose(emb_grad.cpu(), triton_emb_grad.cpu()), 'grad is the same'
 
 print('succeeded')
