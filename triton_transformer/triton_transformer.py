@@ -6,6 +6,14 @@ from einops import rearrange
 import triton
 import triton.language as tl
 
+# helpers
+
+def exists(val):
+    return val is not None
+
+def default(val, d):
+    return val if exists(val) else d
+
 # triton substitutes
 
 
@@ -16,18 +24,22 @@ class Attention(nn.Module):
         self,
         dim,
         dim_head = 64,
-        heads = 8
+        heads = 8,
+        use_triton = False
     ):
         super().__init__()
+        self.use_triton = use_triton
         self.heads = heads
         self.scale = dim_head ** -0.5
         inner_dim = dim_head * heads
 
         self.norm = nn.LayerNorm(dim)
+        self.act = nn.Softmax(dim = -1)
         self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
         self.to_out = nn.Linear(inner_dim, dim)
 
-    def forward(self, x, mask = None):
+    def forward(self, x, mask = None, use_triton = None):
+        use_triton = default(self.use_triton, use_triton)
         h = self.heads
         x = self.norm(x)
 
@@ -41,18 +53,33 @@ class Attention(nn.Module):
             mask_value = -torch.finfo(sim.dtype).max
             sim = sim.masked_fill(mask, mask_value)
 
-        attn = sim.softmax(dim = -1)
+        attn = self.act(sim)
         out = einsum('b i j, b j d -> b i d', attn, v)
         out = rearrange(out, '(b h) n d -> b n (h d)', h = h)
         return self.to_out(out)
 
-def FeedForward(dim, mult = 4):
-    return nn.Sequential(
-        nn.LayerNorm(dim),
-        nn.Linear(dim, dim * mult),
-        nn.GELU(),
-        nn.Linear(dim * mult, dim)
-    )
+class FeedForward(nn.Module):
+    def __init__(
+        self,
+        dim,
+        mult = 4,
+        use_triton = False
+    ):
+        super().__init__()
+        self.use_triton = use_triton
+        self.norm = nn.LayerNorm(dim)
+        self.proj_in = nn.Linear(dim, dim * mult)
+        self.act = nn.GELU()
+        self.proj_out = nn.Linear(dim * mult, dim)
+
+    def forward(self, x, use_triton = None):
+        use_triton = default(use_triton, self.use_triton)
+
+        x = self.norm(x)
+        x = self.proj_in(x)
+        x = self.act(x)
+        x = self.proj_out(x)
+        return x
 
 # main class
 
@@ -77,14 +104,12 @@ class Transformer(nn.Module):
         self.layers = nn.ModuleList([])
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                Attention(dim, heads = heads, dim_head = dim_head),
-                FeedForward(dim)
+                Attention(dim, heads = heads, dim_head = dim_head, use_triton = use_triton),
+                FeedForward(dim, use_triton = use_triton)
             ]))
 
-        self.to_logits = nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, num_tokens)
-        )
+        self.norm = nn.LayerNorm(dim)
+        self.to_logits = nn.Linear(dim, num_tokens)
 
         # mask
 
@@ -94,7 +119,7 @@ class Transformer(nn.Module):
         self.register_buffer('mask', mask, persistent = False)
 
     def forward(self, x, mask = None, use_triton = None):
-        use_triton = self.use_triton if use_triton is None else use_triton
+        use_triton = default(use_triton, self.use_triton)
         n, device = x.shape[1], x.device
 
         # embed token and add positional embedding
@@ -115,7 +140,8 @@ class Transformer(nn.Module):
         # go through layers
 
         for attn, ff in self.layers:
-            x = attn(x, mask = mask) + x
-            x = ff(x) + x
+            x = attn(x, mask = mask, use_triton = use_triton) + x
+            x = ff(x, use_triton = use_triton) + x
 
+        x = self.norm(x)
         return self.to_logits(x)
