@@ -49,7 +49,7 @@ class Attention(nn.Module):
         q = q * self.scale
         sim = einsum('b i d, b j d -> b i j', q, k)
 
-        if mask is not None:
+        if exists(mask):
             mask_value = -torch.finfo(sim.dtype).max
             sim = sim.masked_fill(mask, mask_value)
 
@@ -118,7 +118,18 @@ class Transformer(nn.Module):
         mask = torch.ones(max_seq_len, max_seq_len, dtype = torch.bool).triu(1) if causal else None
         self.register_buffer('mask', mask, persistent = False)
 
-    def forward(self, x, mask = None, use_triton = None):
+        # loss fn
+
+        self.loss_fn = nn.CrossEntropyLoss(ignore_index = 0)
+
+    def forward(
+        self,
+        x,
+        mask = None,
+        *,
+        labels = None,
+        use_triton = None
+    ):
         use_triton = default(use_triton, self.use_triton)
         n, device = x.shape[1], x.device
 
@@ -133,7 +144,7 @@ class Transformer(nn.Module):
         if self.causal:
             mask = self.mask[:n, :n]
             mask = rearrange(mask, 'i j -> () i j')
-        elif mask is not None:
+        elif exists(mask):
             mask = rearrange(mask, 'b i -> b i ()') * rearrange(mask, 'b j -> b () j')
             mask = ~mask
 
@@ -144,4 +155,10 @@ class Transformer(nn.Module):
             x = ff(x, use_triton = use_triton) + x
 
         x = self.norm(x)
-        return self.to_logits(x)
+        logits = self.to_logits(x)
+
+        if not exists(labels):
+            return logits
+
+        logits = rearrange(logits, 'b n c -> b c n')
+        return self.loss_fn(logits, labels)

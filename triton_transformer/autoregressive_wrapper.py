@@ -26,17 +26,15 @@ def top_k(logits, thres = 0.9):
     return probs
 
 class AutoregressiveWrapper(nn.Module):
-    def __init__(self, net, ignore_index = -100, pad_value = 0):
+    def __init__(self, net, pad_value = 0):
         super().__init__()
         self.pad_value = pad_value
-        self.ignore_index = ignore_index
-
         self.net = net
         self.max_seq_len = net.max_seq_len
 
     @torch.no_grad()
     @eval_decorator
-    def generate(self, start_tokens, seq_len, eos_token = None, temperature = 1., filter_logits_fn = top_k, filter_thres = 0.9, **kwargs):
+    def generate(self, start_tokens, seq_len, eos_token = None, temperature = 1., filter_thres = 0.9, **kwargs):
         b, t, device = *start_tokens.shape, start_tokens.device
 
         out = start_tokens
@@ -68,10 +66,4 @@ class AutoregressiveWrapper(nn.Module):
 
     def forward(self, x, **kwargs):
         x_inp, x_labels = x[:, :-1], x[:, 1:]
-        out = self.net(x_inp, **kwargs)
-
-        return F.cross_entropy(
-            out.transpose(1, 2),
-            x_labels,
-            ignore_index = self.ignore_index
-        )
+        return self.net(x_inp, labels = x_labels, **kwargs)
