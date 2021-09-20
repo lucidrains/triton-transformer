@@ -58,6 +58,10 @@ class Attention(nn.Module):
         out = rearrange(out, '(b h) n d -> b n (h d)', h = h)
         return self.to_out(out)
 
+class ReLUSquared(nn.Module):
+    def forward(self, x):
+        return F.relu(x) ** 2
+
 class FeedForward(nn.Module):
     def __init__(
         self,
@@ -69,7 +73,7 @@ class FeedForward(nn.Module):
         self.use_triton = use_triton
         self.norm = nn.LayerNorm(dim)
         self.proj_in = nn.Linear(dim, dim * mult)
-        self.act = nn.GELU()
+        self.act = ReLUSquared()
         self.proj_out = nn.Linear(dim * mult, dim)
 
     def forward(self, x, use_triton = None):

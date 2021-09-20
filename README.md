@@ -50,3 +50,14 @@ logits = model(x, mask = mask) # (1, 1024, 256)
     primaryClass = {cs.CL}
 }
 ```
+
+```bibtex
+@misc{so2021primer,
+    title   = {Primer: Searching for Efficient Transformers for Language Modeling},
+    author  = {David R. So and Wojciech Mańke and Hanxiao Liu and Zihang Dai and Noam Shazeer and Quoc V. Le},
+    year    = {2021},
+    eprint  = {2109.08668},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.LG}
+}
+```
