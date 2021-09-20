@@ -1,5 +1,5 @@
 import torch
-from torch import nn, einsum
+from torch import nn, einsum, autograd
 import torch.nn.functional as F
 from einops import rearrange
 
@@ -16,6 +16,21 @@ def default(val, d):
 
 # triton substitutes
 
+class _relu_squared(autograd.Function):
+    @classmethod
+    def forward(self, ctx, x):
+        zeros = torch.zeros_like(x)
+        out = torch.where(x > 0, x * x, zeros)
+        ctx.save_for_backward(x)
+        return out
+
+    @classmethod
+    def backward(self, ctx, dy):
+        x, = ctx.saved_tensors
+        zeros = torch.zeros_like(x)
+        return torch.where(x > 0, dy * x * 2, zeros)
+
+relu_squared = _relu_squared.apply
 
 # helpers classes
 
@@ -81,7 +96,9 @@ class FeedForward(nn.Module):
 
         x = self.norm(x)
         x = self.proj_in(x)
-        x = self.act(x)
+
+        act_fn = relu_squared if use_triton else self.act
+        x = act_fn(x)
         x = self.proj_out(x)
         return x
 
