@@ -63,6 +63,18 @@ def softmax_kernel_forward(
     output_ptrs = output_row_start_ptr + col_offsets
     tl.store(output_ptrs, softmax_output, mask=col_offsets < n_cols)
 
+@triton.jit
+def softmax_kernel_backward(
+    output_ptr,
+    input_ptr,
+    input_row_stride,
+    output_row_stride,
+    n_cols,
+    **meta
+):
+    # todo
+    pass
+
 class _softmax(autograd.Function):
     @classmethod
     def forward(self, ctx, x):
@@ -114,6 +126,46 @@ triton_softmax = _softmax.apply
 
 # triton - layer norm (wip)
 
+class _layernorm(autograd.Function):
+    @classmethod
+    def forward(cls, ctx, x, gamma, beta, eps):
+        shape = x.shape
+        dim = shape[-1]
+        x = x.view(-1, dim)
+        x_mean = x.mean(dim = -1, keepdim= True)
+        x_var = x.var(dim = -1, unbiased = True, keepdim = True)
+
+        scaled_x = (x - x_mean)
+        sqrt_var = (x_var + eps) ** 0.5
+        normed_x = scaled_x / sqrt_var
+        ctx.save_for_backward(scaled_x, normed_x, gamma, sqrt_var)
+
+        out = rearrange(gamma, 'd -> () d') * normed_x + rearrange(beta, 'd -> () d')
+        return out.view(*shape)
+
+    @classmethod
+    def backward(cls, ctx, dy):
+        shape = dy.shape
+        dim = shape[-1]
+        dy = dy.view(-1, dim)
+        n = dy.shape[0]
+
+        scaled_x, normed_x, gamma, sqrt_var = ctx.saved_tensors
+
+        dbeta = dy.sum(dim = 0)
+        dgamma = (dy * normed_x).sum(dim = 0)
+
+        dx = (1 / n) * gamma * (1 / sqrt_var * (n * dy)) - dy.sum(dim = 0) - (scaled_x * ((1 / sqrt_var) ** 2) * (dy * scaled_x).sum(dim = 0))
+        dx = dx.view(*shape)
+        return dx, dgamma, dbeta, None
+
+def layernorm(x, gamma, beta, eps = 1e-5, use_triton = False):
+    if use_triton:
+        out = _layernorm.apply(x, gamma, beta, eps)
+    else:
+        out = F.layer_norm(x, (x.shape[-1],), gamma, beta, eps = eps)
+    return out
+
 # helpers classes
 
 class Attention(nn.Module):
@@ -130,7 +182,9 @@ class Attention(nn.Module):
         self.scale = dim_head ** -0.5
         inner_dim = dim_head * heads
 
-        self.norm = nn.LayerNorm(dim)
+        self.norm_gamma = nn.Parameter(torch.zeros(dim))
+        self.norm_beta = nn.Parameter(torch.ones(dim))
+
         self.act = nn.Softmax(dim = -1)
         self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
         self.to_out = nn.Linear(inner_dim, dim)
@@ -138,7 +192,7 @@ class Attention(nn.Module):
     def forward(self, x, mask = None, use_triton = None):
         use_triton = default(use_triton, self.use_triton)
         h = self.heads
-        x = self.norm(x)
+        x = layernorm(x, self.norm_gamma, self.norm_beta, use_triton = use_triton)
 
         q, k, v = self.to_qkv(x).chunk(3, dim = -1)
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h = h), (q, k, v))
@@ -170,7 +224,9 @@ class FeedForward(nn.Module):
     ):
         super().__init__()
         self.use_triton = use_triton
-        self.norm = nn.LayerNorm(dim)
+        self.norm_gamma = nn.Parameter(torch.zeros(dim))
+        self.norm_beta = nn.Parameter(torch.ones(dim))
+
         self.proj_in = nn.Linear(dim, dim * mult)
         self.act = ReLUSquared()
         self.proj_out = nn.Linear(dim * mult, dim)
@@ -178,7 +234,7 @@ class FeedForward(nn.Module):
     def forward(self, x, use_triton = None):
         use_triton = default(use_triton, self.use_triton)
 
-        x = self.norm(x)
+        x = layernorm(x, self.norm_gamma, self.norm_beta, use_triton = use_triton)
         x = self.proj_in(x)
 
         act_fn = triton_relu_squared if use_triton else self.act
