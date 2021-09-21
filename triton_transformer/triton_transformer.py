@@ -124,6 +124,14 @@ triton_softmax = _softmax.apply
 
 # triton - cross entropy (wip)
 
+def cross_entropy_fn(logits, labels, ignore_index = 0., use_triton = False):
+    if use_triton:
+        loss = triton.ops.cross_entropy(logits, labels)
+    else:
+        loss = F.cross_entropy(logits, labels, reduction = 'none')
+    mask = (labels != ignore_index)
+    return loss[mask].mean()
+
 # triton - layer norm (wip)
 
 class _layernorm(autograd.Function):
@@ -279,10 +287,6 @@ class Transformer(nn.Module):
         mask = torch.ones(max_seq_len, max_seq_len, dtype = torch.bool).triu(1) if causal else None
         self.register_buffer('mask', mask, persistent = False)
 
-        # loss fn
-
-        self.loss_fn = nn.CrossEntropyLoss(ignore_index = 0)
-
     def forward(
         self,
         x,
@@ -322,4 +326,6 @@ class Transformer(nn.Module):
             return logits
 
         logits = rearrange(logits, 'b n c -> b c n')
-        return self.loss_fn(logits, labels)
+
+        loss = cross_entropy_fn(logits, labels, ignore_index = 0, use_triton = use_triton)        
+        return loss
