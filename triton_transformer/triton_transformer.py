@@ -232,7 +232,7 @@ class _layernorm(autograd.Function):
         dbeta = dy.sum(dim = 0)
         dgamma = (dy * normed_x).sum(dim = 0)
 
-        dx = (1 / n) * gamma * (1 / sqrt_var * (n * dy)) - dy.sum(dim = 0) - (scaled_x * ((1 / sqrt_var) ** 2) * (dy * scaled_x).sum(dim = 0))
+        dx = (1 / n) * gamma * (1 / sqrt_var * (n * dy) - dy.sum(dim = 0) - scaled_x * ((1 / sqrt_var) ** 2) * (dy * scaled_x).sum(dim = 0))
         dx = dx.view(*shape)
         return dx, dgamma, dbeta, None
 
