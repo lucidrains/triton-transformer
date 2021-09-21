@@ -126,8 +126,9 @@ triton_softmax = _softmax.apply
 
 def cross_entropy_fn(logits, labels, ignore_index = 0., use_triton = False):
     if use_triton:
-        loss = triton.ops.cross_entropy(logits, labels)
+        loss = triton.ops.cross_entropy(logits, labels)        
     else:
+        logits = rearrange(logits, 'b n d -> b d n')
         loss = F.cross_entropy(logits, labels, reduction = 'none')
     mask = (labels != ignore_index)
     return loss[mask].mean()
@@ -324,8 +325,6 @@ class Transformer(nn.Module):
 
         if not exists(labels):
             return logits
-
-        logits = rearrange(logits, 'b n c -> b c n')
 
         loss = cross_entropy_fn(logits, labels, ignore_index = 0, use_triton = use_triton)        
         return loss
