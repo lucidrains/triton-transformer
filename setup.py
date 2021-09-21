@@ -17,7 +17,7 @@ setup(
   install_requires=[
     'einops',
     'torch>=1.6',
-    'triton'
+    'triton>=1.0.1dev'
   ],
   classifiers=[
     'Development Status :: 4 - Beta',
