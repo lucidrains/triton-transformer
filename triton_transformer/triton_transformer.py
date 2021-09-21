@@ -14,7 +14,7 @@ def exists(val):
 def default(val, d):
     return val if exists(val) else d
 
-# triton substitutes
+# triton - fused feedforward (wip)
 
 class _relu_squared(autograd.Function):
     @classmethod
@@ -30,7 +30,89 @@ class _relu_squared(autograd.Function):
         zeros = torch.zeros_like(x)
         return torch.where(x > 0, dy * x * 2, zeros)
 
-relu_squared = _relu_squared.apply
+triton_relu_squared = _relu_squared.apply
+
+# triton - softmax (wip)
+
+@triton.jit
+def softmax_kernel_forward(
+    output_ptr,
+    input_ptr,
+    input_row_stride,
+    output_row_stride,
+    n_cols,
+    **meta
+):
+    row_idx = tl.program_id(0)
+    BLOCK_SIZE = meta['BLOCK_SIZE']
+
+    row_start_ptr = input_ptr + row_idx * input_row_stride
+
+    col_offsets = tl.arange(0, BLOCK_SIZE)
+    input_ptrs = row_start_ptr + col_offsets
+
+    row = tl.load(input_ptrs, mask=col_offsets < n_cols, other=-float('inf'))
+
+    row_minus_max = row - tl.max(row, axis=0)
+
+    numerator = tl.exp(row_minus_max)
+    denominator = tl.sum(numerator, axis=0)
+    softmax_output = numerator / denominator
+
+    output_row_start_ptr = output_ptr + row_idx * output_row_stride
+    output_ptrs = output_row_start_ptr + col_offsets
+    tl.store(output_ptrs, softmax_output, mask=col_offsets < n_cols)
+
+class _softmax(autograd.Function):
+    @classmethod
+    def forward(self, ctx, x):
+        shape = x.shape
+        x = x.view(-1, shape[-1])
+        n_rows, n_cols = x.shape
+
+        BLOCK_SIZE = triton.next_power_of_2(n_cols)
+
+        num_warps = 4
+        if BLOCK_SIZE >= 2048:
+            num_warps = 8
+        if BLOCK_SIZE >= 4096:
+            num_warps = 16
+
+        y = torch.empty_like(x)
+
+        softmax_kernel_forward[(n_rows,)](
+            y,
+            x,
+            x.stride(0),
+            y.stride(0),
+            n_cols,
+            num_warps=num_warps,
+            BLOCK_SIZE=BLOCK_SIZE,
+        )
+
+        ctx.save_for_backward(y)
+        return y.view(*shape)
+
+    @classmethod
+    def backward(self, ctx, grad_probs):
+        shape = grad_probs.shape
+        probs, = ctx.saved_tensors
+
+        dim = grad_probs.shape[-1]
+        grad_probs = grad_probs.view(-1, dim)
+
+        w1 = rearrange(probs * grad_probs, 'n d -> () n d ()')
+        w2 = torch.eye(dim, dtype = probs.dtype, device = probs.device)[None, ...]
+        w2 = w2 - probs[..., None]
+
+        grad = rearrange(w2 @ w1, '() n d () -> n d')
+        return grad.view(*shape)
+
+triton_softmax = _softmax.apply
+
+# triton - cross entropy (wip)
+
+# triton - layer norm (wip)
 
 # helpers classes
 
@@ -54,7 +136,7 @@ class Attention(nn.Module):
         self.to_out = nn.Linear(inner_dim, dim)
 
     def forward(self, x, mask = None, use_triton = None):
-        use_triton = default(self.use_triton, use_triton)
+        use_triton = default(use_triton, self.use_triton)
         h = self.heads
         x = self.norm(x)
 
@@ -68,7 +150,9 @@ class Attention(nn.Module):
             mask_value = -torch.finfo(sim.dtype).max
             sim = sim.masked_fill(mask, mask_value)
 
-        attn = self.act(sim)
+        attend_fn = triton_softmax if use_triton else self.act
+        attn = attend_fn(sim)
+
         out = einsum('b i j, b j d -> b i d', attn, v)
         out = rearrange(out, '(b h) n d -> b n (h d)', h = h)
         return self.to_out(out)
@@ -97,7 +181,7 @@ class FeedForward(nn.Module):
         x = self.norm(x)
         x = self.proj_in(x)
 
-        act_fn = relu_squared if use_triton else self.act
+        act_fn = triton_relu_squared if use_triton else self.act
         x = act_fn(x)
         x = self.proj_out(x)
         return x

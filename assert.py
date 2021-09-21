@@ -16,8 +16,8 @@ model = Transformer(
     use_triton = False
 ).cuda()
 
-x = torch.randint(0, 256, (1, 1024)).cuda()
-labels = torch.randint(0, 256, (1, 1024)).cuda()
+x = torch.randint(0, 256, (1, 512)).cuda()
+labels = torch.randint(0, 256, (1, 512)).cuda()
 
 # forward and backward pass without triton
 
