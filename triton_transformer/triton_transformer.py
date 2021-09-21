@@ -211,7 +211,7 @@ def cross_entropy_fn(logits, labels, ignore_index = 0., use_triton = False):
         loss = F.cross_entropy(logits, labels, reduction = 'none')
 
     mask = (labels != ignore_index)
-    return loss.mean()
+    return loss[mask].mean()
 
 # triton - layer norm (wip)
 
