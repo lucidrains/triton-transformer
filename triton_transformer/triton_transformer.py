@@ -97,6 +97,12 @@ class _relu_squared(autograd.Function):
 
 triton_relu_squared = _relu_squared.apply
 
+def relu_squared(x, use_triton = False):
+    if use_triton:
+        return triton_relu_squared(x)
+    else:
+        return F.relu(x) ** 2
+
 # triton - softmax (wip)
 
 @triton.jit
@@ -187,6 +193,12 @@ class _softmax(autograd.Function):
 
 triton_softmax = _softmax.apply
 
+def softmax(x, use_triton = False):
+    if use_triton:
+        return triton_softmax(x)
+    else:
+        return F.softmax(x, dim = -1)
+
 # triton - cross entropy (wip)
 
 def cross_entropy_fn(logits, labels, ignore_index = 0., use_triton = False):
@@ -262,7 +274,6 @@ class Attention(nn.Module):
         self.norm_gamma = nn.Parameter(torch.zeros(dim))
         self.norm_beta = nn.Parameter(torch.ones(dim))
 
-        self.act = nn.Softmax(dim = -1)
         self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
         self.to_out = nn.Linear(inner_dim, dim)
 
@@ -281,16 +292,11 @@ class Attention(nn.Module):
             mask_value = -torch.finfo(sim.dtype).max
             sim = sim.masked_fill(mask, mask_value)
 
-        attend_fn = triton_softmax if use_triton else self.act
-        attn = attend_fn(sim)
+        attn = softmax(sim, use_triton = use_triton)
 
         out = einsum('b i j, b j d -> b i d', attn, v)
         out = rearrange(out, '(b h) n d -> b n (h d)', h = h)
         return self.to_out(out)
-
-class ReLUSquared(nn.Module):
-    def forward(self, x):
-        return F.relu(x) ** 2
 
 class FeedForward(nn.Module):
     def __init__(
@@ -305,7 +311,6 @@ class FeedForward(nn.Module):
         self.norm_beta = nn.Parameter(torch.ones(dim))
 
         self.proj_in = nn.Linear(dim, dim * mult)
-        self.act = ReLUSquared()
         self.proj_out = nn.Linear(dim * mult, dim)
 
     def forward(self, x, use_triton = None):
@@ -314,8 +319,7 @@ class FeedForward(nn.Module):
         x = layernorm(x, self.norm_gamma, self.norm_beta, use_triton = use_triton)
         x = self.proj_in(x)
 
-        act_fn = triton_relu_squared if use_triton else self.act
-        x = act_fn(x)
+        x = relu_squared(x, use_triton = use_triton)
         x = self.proj_out(x)
         return x
 
