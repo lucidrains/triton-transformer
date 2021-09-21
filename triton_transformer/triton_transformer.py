@@ -125,13 +125,16 @@ triton_softmax = _softmax.apply
 # triton - cross entropy (wip)
 
 def cross_entropy_fn(logits, labels, ignore_index = 0., use_triton = False):
+    logits = rearrange(logits, 'b n c -> (b n) c')
+    labels = rearrange(labels, 'b n -> (b n)')
+
     if use_triton:
         loss = triton.ops.cross_entropy(logits, labels)        
     else:
-        logits = rearrange(logits, 'b n d -> b d n')
         loss = F.cross_entropy(logits, labels, reduction = 'none')
+
     mask = (labels != ignore_index)
-    return loss[mask].mean()
+    return loss.mean()
 
 # triton - layer norm (wip)
 
@@ -142,7 +145,7 @@ class _layernorm(autograd.Function):
         dim = shape[-1]
         x = x.view(-1, dim)
         x_mean = x.mean(dim = -1, keepdim= True)
-        x_var = x.var(dim = -1, unbiased = True, keepdim = True)
+        x_var = x.var(dim = -1, unbiased = False, keepdim = True)
 
         scaled_x = (x - x_mean)
         sqrt_var = (x_var + eps) ** 0.5
