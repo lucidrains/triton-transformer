@@ -8,7 +8,7 @@ assert torch.cuda.is_available()
 model = Transformer(
     num_tokens = 256,
     max_seq_len = 1024,
-    dim = 256,
+    dim = 64,
     depth = 6,
     heads = 8,
     dim_head = 64,

@@ -83,25 +83,33 @@ def fused_relu_squared_kernel_forward(
 
 class _relu_squared(autograd.Function):
     @classmethod
-    def forward(self, ctx, x):
-        zeros = torch.zeros_like(x)
-        out = torch.where(x > 0, x * x, zeros)
-        ctx.save_for_backward(x)
+    def forward(self, ctx, x, w, b):
+        c = x @ w + b
+        mask = c > 0
+        ctx.save_for_backward(x, w, c, mask)
+
+        zeros = torch.zeros_like(c)
+        out = torch.where(mask, c * c, zeros)
         return out
 
     @classmethod
     def backward(self, ctx, dy):
-        x, = ctx.saved_tensors
-        zeros = torch.zeros_like(x)
-        return torch.where(x > 0, dy * x * 2, zeros)
+        x, w, c, mask = ctx.saved_tensors
+        zeros = torch.zeros_like(dy)
+        dy = torch.where(c > 0, dy * c * 2, zeros)
+        db = torch.where(c > 0, dy, zeros)
+        dx = dy @ w.t()
+        dw = x.transpose(-1, -2) @ dy
+        return dx, dw, db
 
 triton_relu_squared = _relu_squared.apply
 
-def relu_squared(x, use_triton = False):
+def fused_relu_squared(x, w, b, use_triton = False):
     if use_triton:
-        return triton_relu_squared(x)
+        return triton_relu_squared(x, w, b)
     else:
-        return F.relu(x) ** 2
+        proj = x @ w + b
+        return F.relu(proj) ** 2
 
 # triton - softmax (wip)
 
@@ -307,19 +315,20 @@ class FeedForward(nn.Module):
     ):
         super().__init__()
         self.use_triton = use_triton
+        inner_dim = dim * mult
         self.norm_gamma = nn.Parameter(torch.zeros(dim))
         self.norm_beta = nn.Parameter(torch.ones(dim))
 
-        self.proj_in = nn.Linear(dim, dim * mult)
-        self.proj_out = nn.Linear(dim * mult, dim)
+        self.proj_in_weight = nn.Parameter(torch.randn(dim, inner_dim))
+        self.proj_in_bias = nn.Parameter(torch.randn(inner_dim))
+        self.proj_out = nn.Linear(inner_dim, dim)
 
     def forward(self, x, use_triton = None):
         use_triton = default(use_triton, self.use_triton)
 
         x = layernorm(x, self.norm_gamma, self.norm_beta, use_triton = use_triton)
-        x = self.proj_in(x)
 
-        x = relu_squared(x, use_triton = use_triton)
+        x = fused_relu_squared(x, self.proj_in_weight, self.proj_in_bias, use_triton = use_triton)
         x = self.proj_out(x)
         return x
 
