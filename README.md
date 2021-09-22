@@ -35,6 +35,12 @@ mask = torch.ones(1, 1024).bool()
 logits = model(x, mask = mask) # (1, 1024, 256)
 ```
 
+## Test - GPT training
+
+```bash
+$ python train.py
+```
+
 ## Citations
 
 ```bibtex
