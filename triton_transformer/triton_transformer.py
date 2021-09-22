@@ -20,10 +20,6 @@ def default(val, d):
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=3, num_warps=8),
-        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=3, num_warps=8),
-        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 64,  'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 64 , 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64 , 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 64 , 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
@@ -35,11 +31,12 @@ def default(val, d):
 )
 @triton.jit
 def fused_relu_squared_kernel_forward(
-    a_ptr, b_ptr, c_ptr,
+    x_ptr, y_ptr, c_ptr, o_ptr,
     M, N, K,
-    stride_am, stride_ak,
-    stride_bk, stride_bn,
-    stride_cm, stride_cn,
+    stride_al, stride_am, stride_ak,
+    stride_bl, stride_bk, stride_bn,
+    stride_cl, stride_cm, stride_cn,
+    stride_ol, stride_om, stride_on,
     **meta,
 ):
     BLOCK_SIZE_M = meta['BLOCK_SIZE_M']
@@ -47,7 +44,9 @@ def fused_relu_squared_kernel_forward(
     BLOCK_SIZE_K = meta['BLOCK_SIZE_K']
     GROUP_SIZE_M = 8
 
-    pid = tl.program_id(axis=0)
+    pid_batch = tl.program_id(0)
+    pid = tl.program_id(1)
+
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
@@ -60,55 +59,77 @@ def fused_relu_squared_kernel_forward(
     offs_am = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_bn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
-    a_ptrs = a_ptr + (offs_am[:, None]*stride_am + offs_k [None, :]*stride_ak)
-    b_ptrs = b_ptr + (offs_k [:, None]*stride_bk + offs_bn[None, :]*stride_bn)
+    x_ptrs = x_ptr + (offs_am[:, None]*stride_am + offs_k [None, :]*stride_ak + pid_batch*stride_al)
+    y_ptrs = y_ptr + (offs_k [:, None]*stride_bk + offs_bn[None, :]*stride_bn + pid_batch*stride_bl)
 
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    c = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, K, BLOCK_SIZE_K):
-        a = tl.load(a_ptrs)
-        b = tl.load(b_ptrs)
-        accumulator += tl.dot(a, b)
+        x = tl.load(x_ptrs)
+        y = tl.load(y_ptrs)
+        c += tl.dot(x, y)
 
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
+        x_ptrs += BLOCK_SIZE_K * stride_ak
+        y_ptrs += BLOCK_SIZE_K * stride_bk
 
-    accumulator = tl.where(accumulator > 0, accumulator * accumulator, 0) # ReLU squared
-    c = accumulator.to(tl.float16)
+    o = tl.where(c > 0, c * c, 0.) # ReLU squared
 
-    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-    tl.store(c_ptrs, c, mask=c_mask)
+    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+
+    o_ptrs = o_ptr + stride_om * offs_m[:, None] + stride_on * offs_n[None, :] + stride_cl * pid_batch
+    c_ptrs = c_ptr + stride_cm * offs_m[:, None] + stride_cn * offs_n[None, :] + stride_cl * pid_batch
+
+    tl.store(o_ptrs, o, mask=mask)
+    tl.store(c_ptrs, c, mask=mask)
 
 class _relu_squared(autograd.Function):
     @classmethod
-    def forward(self, ctx, x, w, b):
-        c = x @ w + b
-        mask = c > 0
-        ctx.save_for_backward(x, w, c, mask)
+    def forward(self, ctx, x, w):
+        B, N, D = x.shape
 
-        zeros = torch.zeros_like(c)
-        out = torch.where(mask, c * c, zeros)
-        return out
+        y = w[None, ...].expand(B, -1, -1)
+
+        B, M, K = x.shape
+        _, K, N = y.shape
+
+        assert (K % 32 == 0), "We don't check memory-out-of-bounds with K so K must be divisible by BLOCK_SIZE_K"
+
+        c = torch.empty((B, M, N), device = x.device, dtype = x.dtype)
+        o = torch.empty((B, M, N), device = x.device, dtype = x.dtype)
+
+        grid = lambda META: (
+            B, triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']),
+        )
+
+        fused_relu_squared_kernel_forward[grid](
+            x, y, c, o,
+            M, N, K,
+            x.stride(0), x.stride(1), x.stride(2),
+            y.stride(0), y.stride(1), y.stride(2),
+            c.stride(0), c.stride(1), c.stride(2),
+            o.stride(0), o.stride(1), o.stride(2)
+        )
+
+        ctx.save_for_backward(x, w, c)
+        return o
 
     @classmethod
     def backward(self, ctx, dy):
-        x, w, c, mask = ctx.saved_tensors
+        x, w, c = ctx.saved_tensors
         zeros = torch.zeros_like(dy)
         dy = torch.where(c > 0, dy * c * 2, zeros)
-        db = torch.where(c > 0, dy, zeros)
         dx = dy @ w.t()
         dw = x.transpose(-1, -2) @ dy
-        return dx, dw, db
+        return dx, dw
 
 triton_relu_squared = _relu_squared.apply
 
-def fused_relu_squared(x, w, b, use_triton = False):
+def fused_relu_squared(x, w, use_triton = False):
     if use_triton:
-        return triton_relu_squared(x, w, b)
+        return triton_relu_squared(x, w)
     else:
-        proj = x @ w + b
+        proj = x @ w
         return F.relu(proj) ** 2
 
 # triton - softmax (wip)
@@ -255,7 +276,7 @@ def cross_entropy_fn(logits, labels, ignore_index = 0., use_triton = False):
     mask = (labels != ignore_index)
     return loss[mask].mean()
 
-# triton - layer norm (wip)
+# triton - layer norm
 
 @triton.jit
 def layernorm_kernel_forward(
@@ -503,7 +524,6 @@ class FeedForward(nn.Module):
         self.norm = nn.LayerNorm(dim)
 
         self.proj_in_weight = nn.Parameter(torch.randn(dim, inner_dim))
-        self.proj_in_bias = nn.Parameter(torch.randn(inner_dim))
         self.proj_out = nn.Linear(inner_dim, dim)
 
     def forward(self, x, use_triton = None):
@@ -511,7 +531,7 @@ class FeedForward(nn.Module):
 
         x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = False)
 
-        x = fused_relu_squared(x, self.proj_in_weight, self.proj_in_bias, use_triton = use_triton)
+        x = fused_relu_squared(x, self.proj_in_weight, use_triton = use_triton)
         x = self.proj_out(x)
         return x
 
