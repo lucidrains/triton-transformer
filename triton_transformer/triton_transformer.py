@@ -252,7 +252,7 @@ class _layernorm(autograd.Function):
         dbeta = dy.sum(dim = 0)
         dgamma = (dy * normed_x).sum(dim = 0)
 
-        dx = (1 / n) * gamma * (1 / sqrt_var * (n * dy) - dy.sum(dim = 0) - scaled_x * ((1 / sqrt_var) ** 2) * (dy * scaled_x).sum(dim = 0))
+        dx = (1 / n) * gamma * (1 / sqrt_var * (n * dy) - dbeta - scaled_x * ((1 / sqrt_var) ** 2) * (dy * scaled_x).sum(dim = 0))
         dx = dx.view(*shape)
         return dx, dgamma, dbeta, None
 
@@ -359,7 +359,8 @@ class Transformer(nn.Module):
                 FeedForward(dim, use_triton = use_triton)
             ]))
 
-        self.norm = nn.LayerNorm(dim)
+        self.norm_gamma = nn.Parameter(torch.ones(dim))
+        self.norm_beta = nn.Parameter(torch.zeros(dim))
         self.to_logits = nn.Linear(dim, num_tokens)
 
         # mask
@@ -401,7 +402,7 @@ class Transformer(nn.Module):
             x = attn(x, mask = mask, use_triton = use_triton) + x
             x = ff(x, use_triton = use_triton) + x
 
-        x = self.norm(x)
+        x = layernorm(x, self.norm_gamma, self.norm_beta, use_triton = use_triton)
         logits = self.to_logits(x)
 
         if not exists(labels):
