@@ -31,11 +31,10 @@ def default(val, d):
 )
 @triton.jit
 def fused_relu_squared_kernel_forward(
-    x_ptr, y_ptr, c_ptr, o_ptr,
+    x_ptr, y_ptr, o_ptr,
     M, N, K,
     stride_al, stride_am, stride_ak,
     stride_bl, stride_bk, stride_bn,
-    stride_cl, stride_cm, stride_cn,
     stride_ol, stride_om, stride_on,
     **meta,
 ):
@@ -77,11 +76,8 @@ def fused_relu_squared_kernel_forward(
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
 
-    o_ptrs = o_ptr + stride_om * offs_m[:, None] + stride_on * offs_n[None, :] + stride_cl * pid_batch
-    c_ptrs = c_ptr + stride_cm * offs_m[:, None] + stride_cn * offs_n[None, :] + stride_cl * pid_batch
-
+    o_ptrs = o_ptr + stride_om * offs_m[:, None] + stride_on * offs_n[None, :] + stride_ol * pid_batch
     tl.store(o_ptrs, o, mask=mask)
-    tl.store(c_ptrs, c, mask=mask)
 
 class _relu_squared(autograd.Function):
     @classmethod
@@ -103,21 +99,21 @@ class _relu_squared(autograd.Function):
         )
 
         fused_relu_squared_kernel_forward[grid](
-            x, y, c, o,
+            x, y, o,
             M, N, K,
             x.stride(0), x.stride(1), x.stride(2),
             y.stride(0), y.stride(1), y.stride(2),
-            c.stride(0), c.stride(1), c.stride(2),
             o.stride(0), o.stride(1), o.stride(2)
         )
 
-        ctx.save_for_backward(x, w, c)
+        ctx.save_for_backward(x, w, o)
         return o
 
     @classmethod
     def backward(self, ctx, dy):
-        x, w, c = ctx.saved_tensors
+        x, w, o = ctx.saved_tensors
         zeros = torch.zeros_like(dy)
+        c = torch.sqrt(o)
         dy = torch.where(c > 0, dy * c * 2, zeros)
         dx = dy @ w.t()
         dw = x.transpose(-1, -2) @ dy

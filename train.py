@@ -43,7 +43,7 @@ model = Transformer(
     depth = 8,
     heads = 8,
     causal = True,
-    use_triton = True
+    use_triton = False
 )
 
 model = AutoregressiveWrapper(model)
