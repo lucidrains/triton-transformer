@@ -4,9 +4,11 @@ Implementation of a Transformer, but completely in <a href="https://triton-lang.
 
 - [x] softmax
 - [x] cross-entropy (using triton ops)
-- [ ] batch matrix multiply with fused relu squared
-- [ ] fused attention
-- [ ] layernorm
+- [x] layernorm forward
+- [ ] batch matrix multiply + fused act forwards
+- [ ] batch matrix multiply + fused act backwards
+- [ ] layernorm backwards
+- [ ] fused attention (expand on softmax)
 
 ## Install
 

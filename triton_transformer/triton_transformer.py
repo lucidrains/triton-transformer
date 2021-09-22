@@ -257,24 +257,119 @@ def cross_entropy_fn(logits, labels, ignore_index = 0., use_triton = False):
 
 # triton - layer norm (wip)
 
+@triton.jit
+def layernorm_kernel_forward(
+    output_ptr,
+    normed_ptr,
+    mean_centered_ptr,
+    inv_var_ptr,
+    input_ptr,
+    gamma_ptr,
+    beta_ptr,
+    input_row_stride,
+    gamma_row_stride,
+    beta_row_stride,
+    output_row_stride,
+    normed_row_stride,
+    mean_centered_row_stride,
+    inv_var_row_stride,
+    n_cols,
+    eps,
+    **meta
+):
+    row_idx = tl.program_id(0)
+    BLOCK_SIZE = meta['BLOCK_SIZE']
+
+    row_start_ptr = input_ptr + row_idx * input_row_stride
+    gamma_row_start_ptr = gamma_ptr + row_idx * gamma_row_stride
+    beta_row_start_ptr = beta_ptr + row_idx * beta_row_stride
+
+    col_offsets = tl.arange(0, BLOCK_SIZE)
+    input_ptrs = row_start_ptr + col_offsets
+    gamma_ptrs = gamma_row_start_ptr + col_offsets
+    beta_ptrs = beta_row_start_ptr + col_offsets
+
+    mask = col_offsets < n_cols
+    row = tl.load(input_ptrs, mask=mask, other=0.)
+    gammas = tl.load(gamma_ptrs, mask=mask, other=0.)
+    betas = tl.load(beta_ptrs, mask=mask, other=0.)
+
+    row_mean = tl.sum(row, axis = 0) / n_cols
+    row_mean_centered = row - row_mean
+    row_var = tl.sum(row_mean_centered * row_mean_centered, axis = 0) / n_cols
+    inv_var = 1. / tl.sqrt(row_var + eps)
+    normed = row_mean_centered * inv_var
+
+    output = normed * gammas + betas
+
+    output_row_start_ptr = output_ptr + row_idx * output_row_stride
+    output_ptrs = output_row_start_ptr + col_offsets
+    tl.store(output_ptrs, output, mask=mask)
+
+    normed_row_start_ptr = normed_ptr + row_idx * normed_row_stride
+    normed_ptrs = normed_row_start_ptr + col_offsets
+    tl.store(normed_ptrs, normed, mask=mask)
+
+    mean_centered_row_start_ptr = mean_centered_ptr + row_idx * mean_centered_row_stride
+    mean_centered_ptrs = mean_centered_row_start_ptr + col_offsets
+    tl.store(mean_centered_ptrs, row_mean_centered, mask=mask)
+
+    inv_var_row_start_ptr = inv_var_ptr + row_idx * inv_var_row_stride
+    inv_var_ptrs = inv_var_row_start_ptr + col_offsets
+    tl.store(inv_var_ptrs, inv_var, mask=mask)
+
+@triton.jit
+def layernorm_kernel_backward(
+    output_ptr,
+    input_ptr,
+    input_row_stride,
+    output_row_stride,
+    n_cols,
+    **meta
+):
+    pass
+
 class _layernorm(autograd.Function):
     @classmethod
     def forward(cls, ctx, x, gamma, beta, eps):
         shape = x.shape
         dim = shape[-1]
         x = x.view(-1, dim)
+        n_rows, n_cols = x.shape
 
-        x_mean = x.mean(dim = 1, keepdim= True)
-        x_var = x.var(dim = 1, unbiased = False, keepdim = True)
+        expanded_gamma = gamma[None, :].expand(n_rows, -1)
+        expanded_beta = beta[None, :].expand(n_rows, -1)
 
-        scaled_x = (x - x_mean)
-        sqrt_var = (x_var + eps) ** 0.5
-        inv_var = 1. / sqrt_var
-        normed_x = scaled_x * inv_var
+        BLOCK_SIZE = triton.next_power_of_2(n_cols)
+        num_warps = calc_num_warps(BLOCK_SIZE)
 
-        ctx.save_for_backward(scaled_x, normed_x, gamma, sqrt_var, inv_var)
+        out = torch.empty_like(x)
+        normed_x = torch.empty_like(x)
+        scaled_x = torch.empty_like(x)
+        inv_var = torch.empty_like(x)
 
-        out = rearrange(gamma, 'd -> () d') * normed_x + rearrange(beta, 'd -> () d')
+        layernorm_kernel_forward[(n_rows,)](
+            out,
+            normed_x,
+            scaled_x,
+            inv_var,
+            x,
+            expanded_gamma,
+            expanded_beta,
+            x.stride(0),
+            expanded_gamma.stride(0),
+            expanded_beta.stride(0),
+            out.stride(0),
+            normed_x.stride(0),
+            scaled_x.stride(0),
+            inv_var.stride(0),
+            n_cols,
+            eps,
+            num_warps = num_warps,
+            BLOCK_SIZE = BLOCK_SIZE,
+        )
+
+        ctx.save_for_backward(scaled_x, normed_x, gamma, inv_var)
         return out.view(*shape)
 
     @classmethod
@@ -283,7 +378,7 @@ class _layernorm(autograd.Function):
         dim = shape[-1]
         dy = dy.view(-1, dim)
 
-        scaled_x, normed_x, gamma, sqrt_var, inv_var = ctx.saved_tensors
+        scaled_x, normed_x, gamma, inv_var = ctx.saved_tensors
 
         dbeta = dy.sum(dim = 0)
         dgamma = (dy * normed_x).sum(dim = 0)
