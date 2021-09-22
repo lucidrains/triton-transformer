@@ -5,9 +5,9 @@ Implementation of a Transformer, but completely in <a href="https://triton-lang.
 - [x] softmax
 - [x] cross-entropy (using triton ops)
 - [x] layernorm forward
+- [x] layernorm backwards
 - [ ] batch matrix multiply + fused act forwards
 - [ ] batch matrix multiply + fused act backwards
-- [ ] layernorm backwards
 - [ ] fused attention (expand on softmax)
 
 ## Install

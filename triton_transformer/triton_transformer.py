@@ -321,13 +321,44 @@ def layernorm_kernel_forward(
 @triton.jit
 def layernorm_kernel_backward(
     output_ptr,
-    input_ptr,
-    input_row_stride,
+    dy_ptr,
+    normed_ptr,
+    mean_centered_ptr,
+    inv_var_ptr,
     output_row_stride,
+    dy_row_stride,
+    normed_row_stride,
+    mean_centered_row_stride,
+    inv_var_row_stride,
     n_cols,
     **meta
 ):
-    pass
+    row_idx = tl.program_id(0)
+    BLOCK_SIZE = meta['BLOCK_SIZE']
+
+    dy_row_start_ptr = dy_ptr + row_idx * dy_row_stride
+    normed_row_start_ptr = normed_ptr + row_idx * normed_row_stride
+    mean_centered_row_start_ptr = mean_centered_ptr + row_idx * mean_centered_row_stride
+    inv_var_row_start_ptr = inv_var_ptr + row_idx * inv_var_row_stride
+
+    col_offsets = tl.arange(0, BLOCK_SIZE)
+    dy_ptrs = dy_row_start_ptr + col_offsets
+    normed_ptrs = normed_row_start_ptr + col_offsets
+    mean_centered_ptrs = mean_centered_row_start_ptr + col_offsets
+    inv_var_ptrs = inv_var_row_start_ptr + col_offsets
+
+    mask = col_offsets < n_cols
+
+    dy = tl.load(dy_ptrs, mask=mask, other=0.)
+    normed = tl.load(normed_ptrs, mask=mask, other=0.)
+    mean_centered = tl.load(mean_centered_ptrs, mask=mask, other=0.)
+    inv_var = tl.load(inv_var_ptrs, mask=mask, other=0.)
+
+    output = 1. / n_cols * inv_var * (n_cols * dy - tl.sum(dy, axis = 0) - normed * tl.sum(dy * normed, axis = 0))
+
+    output_row_start_ptr = output_ptr + row_idx * output_row_stride
+    output_ptrs = output_row_start_ptr + col_offsets
+    tl.store(output_ptrs, output, mask=mask)
 
 class _layernorm(autograd.Function):
     @classmethod
@@ -382,12 +413,30 @@ class _layernorm(autograd.Function):
 
         dbeta = dy.sum(dim = 0)
         dgamma = (dy * normed_x).sum(dim = 0)
-
         dxhat = dy * gamma
 
-        D, N = normed_x.shape
+        n_rows, n_cols = normed_x.shape
 
-        dx = 1.0 / N * inv_var * (N * dxhat - dxhat.sum(dim = 1, keepdim = True) - normed_x * (dxhat * normed_x).sum(dim = 1, keepdim = True))
+        BLOCK_SIZE = triton.next_power_of_2(n_cols)
+        num_warps = calc_num_warps(BLOCK_SIZE)
+
+        dx = torch.empty_like(dy)
+
+        layernorm_kernel_backward[(n_rows,)](
+            dx,
+            dxhat,
+            normed_x,
+            scaled_x,
+            inv_var,
+            dx.stride(0),
+            dxhat.stride(0),
+            normed_x.stride(0),
+            scaled_x.stride(0),
+            inv_var.stride(0),
+            n_cols,
+            num_warps = num_warps,
+            BLOCK_SIZE = BLOCK_SIZE,
+        )
 
         dx = dx.view(*shape)
         return dx, dgamma, dbeta, None
