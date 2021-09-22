@@ -162,20 +162,17 @@ def softmax_kernel_backward(
     **meta
 ):
     row_idx = tl.program_id(0)
-    grad_row_idx = tl.program_id(1)
     BLOCK_SIZE = meta['BLOCK_SIZE']
 
     row_start_ptr = input_ptr + row_idx * input_row_stride
-    grad_row_start_ptr = grad_ptr + grad_row_idx * grad_row_stride
+    grad_row_start_ptr = grad_ptr + row_idx * grad_row_stride
 
     col_offsets = tl.arange(0, BLOCK_SIZE)
     input_ptrs = row_start_ptr + col_offsets
+    grad_ptrs = grad_row_start_ptr + col_offsets
 
-    grad_col_offsets = tl.arange(0, BLOCK_SIZE)
-    grad_ptrs = grad_row_start_ptr + grad_col_offsets
-
-    probs_row = tl.load(input_ptrs, mask = col_offsets < n_cols, other = 0)
-    grad_row = tl.load(grad_ptrs, mask = grad_col_offsets < n_cols, other = 0)
+    probs_row = tl.load(input_ptrs, mask = col_offsets < n_cols, other = 0.)
+    grad_row = tl.load(grad_ptrs, mask = col_offsets < n_cols, other = 0.)
 
     dxhat = probs_row * grad_row
     softmax_grad_output = dxhat - probs_row * tl.sum(dxhat, axis = 0)
