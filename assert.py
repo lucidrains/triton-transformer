@@ -39,6 +39,6 @@ triton_emb_grad = model.token_emb.weight.grad.clone()
 # should be equal, for output and gradients on token embeddings
 
 assert torch.allclose(loss.cpu(), triton_loss.cpu(), atol=1e-6), 'output is the same'
-assert torch.allclose(emb_grad.cpu(), triton_emb_grad.cpu(), atol=1e-6), 'grad is the same'
+assert torch.allclose(emb_grad.cpu(), triton_emb_grad.cpu(), atol=1e-5), 'grad is the same'
 
 print('succeeded')

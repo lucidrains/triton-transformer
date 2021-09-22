@@ -2,6 +2,12 @@
 
 Implementation of a Transformer, but completely in <a href="https://triton-lang.org/">Triton</a>. I'm completely new to lower-level neural net code, so this repository will mostly be a learning experience, with the end-goal being a vanilla transformer that is faster and more efficient to train.
 
+- [x] softmax
+- [x] cross-entropy (using triton ops)
+- [ ] batch matrix multiply with fused relu squared
+- [ ] fused attention
+- [ ] layernorm
+
 ## Install
 
 ```bash

@@ -113,6 +113,14 @@ def fused_relu_squared(x, w, b, use_triton = False):
 
 # triton - softmax (wip)
 
+def calc_num_warps(block_size):
+    num_warps = 4
+    if block_size >= 2048:
+        num_warps = 8
+    if block_size >= 4096:
+        num_warps = 16
+    return num_warps
+
 @triton.jit
 def softmax_kernel_forward(
     output_ptr,
@@ -146,13 +154,35 @@ def softmax_kernel_forward(
 def softmax_kernel_backward(
     output_ptr,
     input_ptr,
+    grad_ptr,
+    grad_row_stride,
     input_row_stride,
     output_row_stride,
     n_cols,
     **meta
 ):
-    # todo
-    pass
+    row_idx = tl.program_id(0)
+    grad_row_idx = tl.program_id(1)
+    BLOCK_SIZE = meta['BLOCK_SIZE']
+
+    row_start_ptr = input_ptr + row_idx * input_row_stride
+    grad_row_start_ptr = grad_ptr + grad_row_idx * grad_row_stride
+
+    col_offsets = tl.arange(0, BLOCK_SIZE)
+    input_ptrs = row_start_ptr + col_offsets
+
+    grad_col_offsets = tl.arange(0, BLOCK_SIZE)
+    grad_ptrs = grad_row_start_ptr + grad_col_offsets
+
+    probs_row = tl.load(input_ptrs, mask = col_offsets < n_cols, other = 0)
+    grad_row = tl.load(grad_ptrs, mask = grad_col_offsets < n_cols, other = 0)
+
+    dxhat = probs_row * grad_row
+    softmax_grad_output = dxhat - probs_row * tl.sum(dxhat, axis = 0)
+
+    output_row_start_ptr = output_ptr + row_idx * output_row_stride
+    output_ptrs = output_row_start_ptr + col_offsets
+    tl.store(output_ptrs, softmax_grad_output, mask = col_offsets < n_cols)
 
 class _softmax(autograd.Function):
     @classmethod
@@ -162,12 +192,7 @@ class _softmax(autograd.Function):
         n_rows, n_cols = x.shape
 
         BLOCK_SIZE = triton.next_power_of_2(n_cols)
-
-        num_warps = 4
-        if BLOCK_SIZE >= 2048:
-            num_warps = 8
-        if BLOCK_SIZE >= 4096:
-            num_warps = 16
+        num_warps = calc_num_warps(BLOCK_SIZE)
 
         y = torch.empty_like(x)
 
@@ -177,8 +202,8 @@ class _softmax(autograd.Function):
             x.stride(0),
             y.stride(0),
             n_cols,
-            num_warps=num_warps,
-            BLOCK_SIZE=BLOCK_SIZE,
+            num_warps = num_warps,
+            BLOCK_SIZE = BLOCK_SIZE,
         )
 
         ctx.save_for_backward(y)
@@ -189,11 +214,25 @@ class _softmax(autograd.Function):
         shape = grad_probs.shape
         probs, = ctx.saved_tensors
 
-        dim = grad_probs.shape[-1]
-        grad_probs = grad_probs.view(-1, dim)
+        grad_probs = grad_probs.view(-1, grad_probs.shape[-1])
+        n_rows, n_cols = grad_probs.shape
 
-        dxhat = probs * grad_probs
-        dx = dxhat - (probs * dxhat.sum(dim = -1, keepdim = True))
+        BLOCK_SIZE = triton.next_power_of_2(n_cols)
+        num_warps = calc_num_warps(BLOCK_SIZE)
+
+        dx = torch.empty_like(probs)
+
+        softmax_kernel_backward[(n_rows,)](
+            dx,
+            probs,
+            grad_probs,
+            grad_probs.stride(0),
+            probs.stride(0),
+            dx.stride(0),
+            n_cols,
+            num_warps = num_warps,
+            BLOCK_SIZE = BLOCK_SIZE
+        )
 
         return dx.view(*shape)
 
@@ -205,7 +244,7 @@ def softmax(x, use_triton = False):
     else:
         return F.softmax(x, dim = -1)
 
-# triton - cross entropy (wip)
+# triton - cross entropy
 
 def cross_entropy_fn(logits, labels, ignore_index = 0., use_triton = False):
     logits = rearrange(logits, 'b n c -> (b n) c')
