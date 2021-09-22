@@ -42,7 +42,8 @@ model = Transformer(
     max_seq_len = SEQ_LEN,
     depth = 8,
     heads = 8,
-    causal = True
+    causal = True,
+    use_triton = True
 )
 
 model = AutoregressiveWrapper(model)

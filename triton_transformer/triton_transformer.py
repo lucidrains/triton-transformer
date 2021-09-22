@@ -284,8 +284,7 @@ class Attention(nn.Module):
         self.scale = dim_head ** -0.5
         inner_dim = dim_head * heads
 
-        self.norm_gamma = nn.Parameter(torch.zeros(dim))
-        self.norm_beta = nn.Parameter(torch.ones(dim))
+        self.norm = nn.LayerNorm(dim)
 
         self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
         self.to_out = nn.Linear(inner_dim, dim)
@@ -293,7 +292,7 @@ class Attention(nn.Module):
     def forward(self, x, mask = None, use_triton = None):
         use_triton = default(use_triton, self.use_triton)
         h = self.heads
-        x = layernorm(x, self.norm_gamma, self.norm_beta, use_triton = use_triton)
+        x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = use_triton)
 
         q, k, v = self.to_qkv(x).chunk(3, dim = -1)
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h = h), (q, k, v))
@@ -321,8 +320,7 @@ class FeedForward(nn.Module):
         super().__init__()
         self.use_triton = use_triton
         inner_dim = dim * mult
-        self.norm_gamma = nn.Parameter(torch.zeros(dim))
-        self.norm_beta = nn.Parameter(torch.ones(dim))
+        self.norm = nn.LayerNorm(dim)
 
         self.proj_in_weight = nn.Parameter(torch.randn(dim, inner_dim))
         self.proj_in_bias = nn.Parameter(torch.randn(inner_dim))
@@ -331,7 +329,7 @@ class FeedForward(nn.Module):
     def forward(self, x, use_triton = None):
         use_triton = default(use_triton, self.use_triton)
 
-        x = layernorm(x, self.norm_gamma, self.norm_beta, use_triton = use_triton)
+        x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = False)
 
         x = fused_relu_squared(x, self.proj_in_weight, self.proj_in_bias, use_triton = use_triton)
         x = self.proj_out(x)
@@ -364,8 +362,7 @@ class Transformer(nn.Module):
                 FeedForward(dim, use_triton = use_triton)
             ]))
 
-        self.norm_gamma = nn.Parameter(torch.ones(dim))
-        self.norm_beta = nn.Parameter(torch.zeros(dim))
+        self.norm = nn.LayerNorm(dim)
         self.to_logits = nn.Linear(dim, num_tokens)
 
         # mask
@@ -407,11 +404,11 @@ class Transformer(nn.Module):
             x = attn(x, mask = mask, use_triton = use_triton) + x
             x = ff(x, use_triton = use_triton) + x
 
-        x = layernorm(x, self.norm_gamma, self.norm_beta, use_triton = use_triton)
+        x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = use_triton)
         logits = self.to_logits(x)
 
         if not exists(labels):
             return logits
 
-        loss = cross_entropy_fn(logits, labels, ignore_index = 0, use_triton = use_triton)        
+        loss = cross_entropy_fn(logits, labels, ignore_index = 0, use_triton = use_triton)
         return loss
