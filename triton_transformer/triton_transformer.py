@@ -229,13 +229,16 @@ class _layernorm(autograd.Function):
         shape = x.shape
         dim = shape[-1]
         x = x.view(-1, dim)
-        x_mean = x.mean(dim = -1, keepdim= True)
-        x_var = x.var(dim = -1, unbiased = False, keepdim = True)
+
+        x_mean = x.mean(dim = 1, keepdim= True)
+        x_var = x.var(dim = 1, unbiased = False, keepdim = True)
 
         scaled_x = (x - x_mean)
         sqrt_var = (x_var + eps) ** 0.5
-        normed_x = scaled_x / sqrt_var
-        ctx.save_for_backward(scaled_x, normed_x, gamma, sqrt_var)
+        inv_var = 1. / sqrt_var
+        normed_x = scaled_x * inv_var
+
+        ctx.save_for_backward(scaled_x, normed_x, gamma, sqrt_var, inv_var)
 
         out = rearrange(gamma, 'd -> () d') * normed_x + rearrange(beta, 'd -> () d')
         return out.view(*shape)
@@ -245,14 +248,18 @@ class _layernorm(autograd.Function):
         shape = dy.shape
         dim = shape[-1]
         dy = dy.view(-1, dim)
-        n = dy.shape[0]
 
-        scaled_x, normed_x, gamma, sqrt_var = ctx.saved_tensors
+        scaled_x, normed_x, gamma, sqrt_var, inv_var = ctx.saved_tensors
 
         dbeta = dy.sum(dim = 0)
         dgamma = (dy * normed_x).sum(dim = 0)
 
-        dx = (1 / n) * gamma * (1 / sqrt_var * (n * dy) - dbeta - scaled_x * ((1 / sqrt_var) ** 2) * (dy * scaled_x).sum(dim = 0))
+        dxhat = dy * gamma
+
+        D, N = normed_x.shape
+
+        dx = 1.0 / N * inv_var * (N * dxhat - dxhat.sum(dim = 1, keepdim = True) - normed_x * (dxhat * normed_x).sum(dim = 1, keepdim = True))
+
         dx = dx.view(*shape)
         return dx, dgamma, dbeta, None
 
