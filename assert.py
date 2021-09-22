@@ -8,7 +8,7 @@ assert torch.cuda.is_available()
 model = Transformer(
     num_tokens = 256,
     max_seq_len = 1024,
-    dim = 64,
+    dim = 512,
     depth = 6,
     heads = 8,
     dim_head = 64,
@@ -16,8 +16,8 @@ model = Transformer(
     use_triton = False
 ).cuda()
 
-x = torch.randint(0, 256, (1, 512)).cuda()
-labels = torch.randint(0, 256, (1, 512)).cuda()
+x = torch.randint(0, 256, (1, 1024)).cuda()
+labels = torch.randint(0, 256, (1, 1024)).cuda()
 
 # forward and backward pass without triton
 

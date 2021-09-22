@@ -192,12 +192,10 @@ class _softmax(autograd.Function):
         dim = grad_probs.shape[-1]
         grad_probs = grad_probs.view(-1, dim)
 
-        w1 = rearrange(probs * grad_probs, 'n d -> () n d ()')
-        w2 = torch.eye(dim, dtype = probs.dtype, device = probs.device)[None, ...]
-        w2 = w2 - probs[..., None]
+        dxhat = probs * grad_probs
+        dx = dxhat - (probs * dxhat.sum(dim = -1, keepdim = True))
 
-        grad = rearrange(w2 @ w1, '() n d () -> n d')
-        return grad.view(*shape)
+        return dx.view(*shape)
 
 triton_softmax = _softmax.apply
 
