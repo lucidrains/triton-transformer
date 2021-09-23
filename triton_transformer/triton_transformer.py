@@ -273,7 +273,7 @@ def cross_entropy_fn(logits, labels, ignore_index = 0., use_triton = False):
 # triton - layer norm
 
 @triton.jit
-def layernorm_kernel_forward(
+def layernorm_kernel_forward_training(
     output_ptr,
     normed_ptr,
     mean_centered_ptr,
@@ -334,6 +334,49 @@ def layernorm_kernel_forward(
     tl.store(inv_var_ptrs, inv_var, mask=mask)
 
 @triton.jit
+def layernorm_kernel_forward_inference(
+    output_ptr,
+    input_ptr,
+    gamma_ptr,
+    beta_ptr,
+    input_row_stride,
+    gamma_row_stride,
+    beta_row_stride,
+    output_row_stride,
+    n_cols,
+    eps,
+    **meta
+):
+    row_idx = tl.program_id(0)
+    BLOCK_SIZE = meta['BLOCK_SIZE']
+
+    row_start_ptr = input_ptr + row_idx * input_row_stride
+    gamma_row_start_ptr = gamma_ptr + row_idx * gamma_row_stride
+    beta_row_start_ptr = beta_ptr + row_idx * beta_row_stride
+
+    col_offsets = tl.arange(0, BLOCK_SIZE)
+    input_ptrs = row_start_ptr + col_offsets
+    gamma_ptrs = gamma_row_start_ptr + col_offsets
+    beta_ptrs = beta_row_start_ptr + col_offsets
+
+    mask = col_offsets < n_cols
+    row = tl.load(input_ptrs, mask=mask, other=0.)
+    gammas = tl.load(gamma_ptrs, mask=mask, other=0.)
+    betas = tl.load(beta_ptrs, mask=mask, other=0.)
+
+    row_mean = tl.sum(row, axis = 0) / n_cols
+    row_mean_centered = row - row_mean
+    row_var = tl.sum(row_mean_centered * row_mean_centered, axis = 0) / n_cols
+    inv_var = 1. / tl.sqrt(row_var + eps)
+    normed = row_mean_centered * inv_var
+
+    output = normed * gammas + betas
+
+    output_row_start_ptr = output_ptr + row_idx * output_row_stride
+    output_ptrs = output_row_start_ptr + col_offsets
+    tl.store(output_ptrs, output, mask=mask)
+
+@triton.jit
 def layernorm_kernel_backward(
     output_ptr,
     dy_ptr,
@@ -377,7 +420,7 @@ def layernorm_kernel_backward(
 
 class _layernorm(autograd.Function):
     @classmethod
-    def forward(cls, ctx, x, gamma, beta, eps):
+    def forward(cls, ctx, x, gamma, beta, eps, training):
         shape = x.shape
         dim = shape[-1]
         x = x.view(-1, dim)
@@ -390,32 +433,49 @@ class _layernorm(autograd.Function):
         num_warps = calc_num_warps(BLOCK_SIZE)
 
         out = torch.empty_like(x)
-        normed_x = torch.empty_like(x)
-        scaled_x = torch.empty_like(x)
-        inv_var = torch.empty_like(x)
 
-        layernorm_kernel_forward[(n_rows,)](
-            out,
-            normed_x,
-            scaled_x,
-            inv_var,
-            x,
-            expanded_gamma,
-            expanded_beta,
-            x.stride(0),
-            expanded_gamma.stride(0),
-            expanded_beta.stride(0),
-            out.stride(0),
-            normed_x.stride(0),
-            scaled_x.stride(0),
-            inv_var.stride(0),
-            n_cols,
-            eps,
-            num_warps = num_warps,
-            BLOCK_SIZE = BLOCK_SIZE,
-        )
+        if training:
+            normed_x = torch.empty_like(x)
+            scaled_x = torch.empty_like(x)
+            inv_var = torch.empty_like(x)
 
-        ctx.save_for_backward(scaled_x, normed_x, gamma, inv_var)
+            layernorm_kernel_forward_training[(n_rows,)](
+                out,
+                normed_x,
+                scaled_x,
+                inv_var,
+                x,
+                expanded_gamma,
+                expanded_beta,
+                x.stride(0),
+                expanded_gamma.stride(0),
+                expanded_beta.stride(0),
+                out.stride(0),
+                normed_x.stride(0),
+                scaled_x.stride(0),
+                inv_var.stride(0),
+                n_cols,
+                eps,
+                num_warps = num_warps,
+                BLOCK_SIZE = BLOCK_SIZE,
+            )
+            ctx.save_for_backward(scaled_x, normed_x, gamma, inv_var)
+        else:
+            layernorm_kernel_forward_inference[(n_rows,)](
+                out,
+                x,
+                expanded_gamma,
+                expanded_beta,
+                x.stride(0),
+                expanded_gamma.stride(0),
+                expanded_beta.stride(0),
+                out.stride(0),
+                n_cols,
+                eps,
+                num_warps = num_warps,
+                BLOCK_SIZE = BLOCK_SIZE,
+            )
+
         return out.view(*shape)
 
     @classmethod
@@ -454,11 +514,11 @@ class _layernorm(autograd.Function):
         )
 
         dx = dx.view(*shape)
-        return dx, dgamma, dbeta, None
+        return dx, dgamma, dbeta, None, None
 
-def layernorm(x, gamma, beta, eps = 1e-5, use_triton = False):
+def layernorm(x, gamma, beta, eps = 1e-5, use_triton = False, training = False):
     if use_triton:
-        out = _layernorm.apply(x, gamma, beta, eps)
+        out = _layernorm.apply(x, gamma, beta, eps, training)
     else:
         out = F.layer_norm(x, (x.shape[-1],), gamma, beta, eps = eps)
     return out
@@ -487,7 +547,7 @@ class Attention(nn.Module):
     def forward(self, x, mask = None, use_triton = None):
         use_triton = default(use_triton, self.use_triton)
         h = self.heads
-        x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = use_triton)
+        x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = use_triton, training = self.training)
 
         q, k, v = self.to_qkv(x).chunk(3, dim = -1)
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h = h), (q, k, v))
@@ -523,7 +583,7 @@ class FeedForward(nn.Module):
     def forward(self, x, use_triton = None):
         use_triton = default(use_triton, self.use_triton)
 
-        x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = False)
+        x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = False, training = self.training)
 
         x = fused_relu_squared(x, self.proj_in_weight, use_triton = use_triton)
         x = self.proj_out(x)
@@ -598,7 +658,7 @@ class Transformer(nn.Module):
             x = attn(x, mask = mask, use_triton = use_triton) + x
             x = ff(x, use_triton = use_triton) + x
 
-        x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = use_triton)
+        x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = use_triton, training = self.training)
         logits = self.to_logits(x)
 
         if not exists(labels):
