@@ -10,6 +10,7 @@ Implementation of a Transformer, but completely in <a href="https://triton-lang.
 - [ ] batch matrix multiply + fused act backwards
 - [ ] fused attention (expand on softmax)
 - [ ] benchmark and optimize
+- [ ] kernels conditional on inference vs training
 
 ## Install
 
