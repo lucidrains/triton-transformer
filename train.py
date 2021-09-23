@@ -81,9 +81,6 @@ optim = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
 # training
 
-import wandb
-wandb.init(project='triton-transformer')
-
 for i in tqdm.tqdm(range(NUM_BATCHES), mininterval=10., desc='training'):
     model.train()
 
@@ -91,7 +88,6 @@ for i in tqdm.tqdm(range(NUM_BATCHES), mininterval=10., desc='training'):
         loss = model(next(train_loader))
         loss.backward()
 
-    wandb.log({'loss': loss.item()})
     print(f'training loss: {loss.item()}')
     torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
     optim.step()

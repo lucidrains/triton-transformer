@@ -14,9 +14,7 @@ def exists(val):
 def default(val, d):
     return val if exists(val) else d
 
-# triton - fused feedforward (wip)
-
-# todo - modify to be bmm
+# triton
 
 @triton.autotune(
     configs=[
@@ -80,10 +78,6 @@ def bmm_kernel(
     o_ptrs = o_ptr + stride_om * offs_m[:, None] + stride_on * offs_n[None, :] + stride_ol * pid_batch
     tl.store(o_ptrs, o, mask=mask)
 
-@triton.jit
-def relu_squared_activation(x):
-    return tl.where(x > 0, x * x, 0.)
-
 def triton_bmm(x, y, activation = None):
     B, M, K = x.shape
 
@@ -109,6 +103,10 @@ def triton_bmm(x, y, activation = None):
     )
     return o
 
+@triton.jit
+def relu_squared_activation(x):
+    return tl.where(x > 0, x * x, 0.)
+
 class _relu_squared(autograd.Function):
     @classmethod
     def forward(self, ctx, x, w):
@@ -133,7 +131,7 @@ def fused_relu_squared(x, w, use_triton = False):
         proj = x @ w
         return F.relu(proj) ** 2
 
-# triton - softmax (wip)
+# triton - softmax
 
 def calc_num_warps(block_size):
     num_warps = 4
@@ -282,7 +280,6 @@ def cross_entropy_fn(logits, labels, ignore_index = 0., use_triton = False):
 @triton.jit
 def layernorm_kernel_forward_training(
     output_ptr,
-    normed_ptr,
     mean_centered_ptr,
     inv_var_ptr,
     input_ptr,
@@ -292,7 +289,6 @@ def layernorm_kernel_forward_training(
     gamma_row_stride,
     beta_row_stride,
     output_row_stride,
-    normed_row_stride,
     mean_centered_row_stride,
     inv_var_row_stride,
     n_cols,
@@ -327,10 +323,6 @@ def layernorm_kernel_forward_training(
     output_row_start_ptr = output_ptr + row_idx * output_row_stride
     output_ptrs = output_row_start_ptr + col_offsets
     tl.store(output_ptrs, output, mask=mask)
-
-    normed_row_start_ptr = normed_ptr + row_idx * normed_row_stride
-    normed_ptrs = normed_row_start_ptr + col_offsets
-    tl.store(normed_ptrs, normed, mask=mask)
 
     mean_centered_row_start_ptr = mean_centered_ptr + row_idx * mean_centered_row_stride
     mean_centered_ptrs = mean_centered_row_start_ptr + col_offsets
@@ -387,12 +379,10 @@ def layernorm_kernel_forward_inference(
 def layernorm_kernel_backward(
     output_ptr,
     dy_ptr,
-    normed_ptr,
     mean_centered_ptr,
     inv_var_ptr,
     output_row_stride,
     dy_row_stride,
-    normed_row_stride,
     mean_centered_row_stride,
     inv_var_row_stride,
     n_cols,
@@ -402,23 +392,21 @@ def layernorm_kernel_backward(
     BLOCK_SIZE = meta['BLOCK_SIZE']
 
     dy_row_start_ptr = dy_ptr + row_idx * dy_row_stride
-    normed_row_start_ptr = normed_ptr + row_idx * normed_row_stride
     mean_centered_row_start_ptr = mean_centered_ptr + row_idx * mean_centered_row_stride
     inv_var_row_start_ptr = inv_var_ptr + row_idx * inv_var_row_stride
 
     col_offsets = tl.arange(0, BLOCK_SIZE)
     dy_ptrs = dy_row_start_ptr + col_offsets
-    normed_ptrs = normed_row_start_ptr + col_offsets
     mean_centered_ptrs = mean_centered_row_start_ptr + col_offsets
     inv_var_ptrs = inv_var_row_start_ptr + col_offsets
 
     mask = col_offsets < n_cols
 
     dy = tl.load(dy_ptrs, mask=mask, other=0.)
-    normed = tl.load(normed_ptrs, mask=mask, other=0.)
     mean_centered = tl.load(mean_centered_ptrs, mask=mask, other=0.)
     inv_var = tl.load(inv_var_ptrs, mask=mask, other=0.)
 
+    normed = mean_centered * inv_var
     output = 1. / n_cols * inv_var * (n_cols * dy - tl.sum(dy, axis = 0) - normed * tl.sum(dy * normed, axis = 0))
 
     output_row_start_ptr = output_ptr + row_idx * output_row_stride
@@ -442,13 +430,11 @@ class _layernorm(autograd.Function):
         out = torch.empty_like(x)
 
         if training:
-            normed_x = torch.empty_like(x)
             scaled_x = torch.empty_like(x)
             inv_var = torch.empty_like(x)
 
             layernorm_kernel_forward_training[(n_rows,)](
                 out,
-                normed_x,
                 scaled_x,
                 inv_var,
                 x,
@@ -458,7 +444,6 @@ class _layernorm(autograd.Function):
                 expanded_gamma.stride(0),
                 expanded_beta.stride(0),
                 out.stride(0),
-                normed_x.stride(0),
                 scaled_x.stride(0),
                 inv_var.stride(0),
                 n_cols,
@@ -466,7 +451,7 @@ class _layernorm(autograd.Function):
                 num_warps = num_warps,
                 BLOCK_SIZE = BLOCK_SIZE,
             )
-            ctx.save_for_backward(scaled_x, normed_x, gamma, inv_var)
+            ctx.save_for_backward(scaled_x, gamma, inv_var)
         else:
             layernorm_kernel_forward_inference[(n_rows,)](
                 out,
@@ -491,13 +476,13 @@ class _layernorm(autograd.Function):
         dim = shape[-1]
         dy = dy.view(-1, dim)
 
-        scaled_x, normed_x, gamma, inv_var = ctx.saved_tensors
+        scaled_x, gamma, inv_var = ctx.saved_tensors
 
         dbeta = dy.sum(dim = 0)
-        dgamma = (dy * normed_x).sum(dim = 0)
+        dgamma = (dy * scaled_x * inv_var).sum(dim = 0)
         dxhat = dy * gamma
 
-        n_rows, n_cols = normed_x.shape
+        n_rows, n_cols = dy.shape
 
         BLOCK_SIZE = triton.next_power_of_2(n_cols)
         num_warps = calc_num_warps(BLOCK_SIZE)
@@ -507,12 +492,10 @@ class _layernorm(autograd.Function):
         layernorm_kernel_backward[(n_rows,)](
             dx,
             dxhat,
-            normed_x,
             scaled_x,
             inv_var,
             dx.stride(0),
             dxhat.stride(0),
-            normed_x.stride(0),
             scaled_x.stride(0),
             inv_var.stride(0),
             n_cols,
