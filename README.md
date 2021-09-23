@@ -12,6 +12,12 @@ Implementation of a Transformer, but completely in <a href="https://triton-lang.
 - [ ] benchmark and optimize
 - [ ] kernels conditional on inference vs training
 
+## Results
+
+Layernorm forward
+
+<img src="./layernorm.png" width="400px"></img>
+
 ## Install
 
 ```bash
