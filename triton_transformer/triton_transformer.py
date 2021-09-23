@@ -30,7 +30,7 @@ def default(val, d):
     key=['M', 'N', 'K'],
 )
 @triton.jit
-def fused_relu_squared_kernel_forward(
+def bmm_kernel(
     x_ptr, y_ptr, o_ptr,
     M, N, K,
     stride_al, stride_am, stride_ak,
@@ -61,16 +61,17 @@ def fused_relu_squared_kernel_forward(
     x_ptrs = x_ptr + (offs_am[:, None]*stride_am + offs_k [None, :]*stride_ak + pid_batch*stride_al)
     y_ptrs = y_ptr + (offs_k [:, None]*stride_bk + offs_bn[None, :]*stride_bn + pid_batch*stride_bl)
 
-    c = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    o = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, K, BLOCK_SIZE_K):
         x = tl.load(x_ptrs)
         y = tl.load(y_ptrs)
-        c += tl.dot(x, y)
+        o += tl.dot(x, y)
 
         x_ptrs += BLOCK_SIZE_K * stride_ak
         y_ptrs += BLOCK_SIZE_K * stride_bk
 
-    o = tl.where(c > 0, c * c, 0.) # ReLU squared
+    if exists(meta['ACTIVATION']):
+        o = meta['ACTIVATION'](o)
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -79,33 +80,39 @@ def fused_relu_squared_kernel_forward(
     o_ptrs = o_ptr + stride_om * offs_m[:, None] + stride_on * offs_n[None, :] + stride_ol * pid_batch
     tl.store(o_ptrs, o, mask=mask)
 
+@triton.jit
+def relu_squared_activation(x):
+    return tl.where(x > 0, x * x, 0.)
+
+def triton_bmm(x, y, activation = None):
+    B, M, K = x.shape
+
+    if y.ndim == 2:
+        y = y.unsqueeze(0).expand(B, -1, -1)
+
+    _, K, N = y.shape
+    assert (K % 32 == 0), "K must be divisible by 32"
+
+    o = torch.empty((B, M, N), device = x.device, dtype = x.dtype)
+
+    grid = lambda META: (
+        B, triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']),
+    )
+
+    bmm_kernel[grid](
+        x, y, o,
+        M, N, K,
+        x.stride(0), x.stride(1), x.stride(2),
+        y.stride(0), y.stride(1), y.stride(2),
+        o.stride(0), o.stride(1), o.stride(2),
+        ACTIVATION = activation
+    )
+    return o
+
 class _relu_squared(autograd.Function):
     @classmethod
     def forward(self, ctx, x, w):
-        B, N, D = x.shape
-
-        y = w[None, ...].expand(B, -1, -1)
-
-        B, M, K = x.shape
-        _, K, N = y.shape
-
-        assert (K % 32 == 0), "We don't check memory-out-of-bounds with K so K must be divisible by BLOCK_SIZE_K"
-
-        c = torch.empty((B, M, N), device = x.device, dtype = x.dtype)
-        o = torch.empty((B, M, N), device = x.device, dtype = x.dtype)
-
-        grid = lambda META: (
-            B, triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']),
-        )
-
-        fused_relu_squared_kernel_forward[grid](
-            x, y, o,
-            M, N, K,
-            x.stride(0), x.stride(1), x.stride(2),
-            y.stride(0), y.stride(1), y.stride(2),
-            o.stride(0), o.stride(1), o.stride(2)
-        )
-
+        o = triton_bmm(x, w, activation = relu_squared_activation)
         ctx.save_for_backward(x, w, o)
         return o
 
@@ -113,8 +120,8 @@ class _relu_squared(autograd.Function):
     def backward(self, ctx, dy):
         x, w, o = ctx.saved_tensors
         dy = torch.sqrt(o) * 2 * dy
-        dx = dy @ w.t()
-        dw = x.transpose(-1, -2) @ dy
+        dx = triton_bmm(dy, w.t())
+        dw = triton_bmm(x.transpose(-1, -2), dy)
         return dx, dw
 
 triton_relu_squared = _relu_squared.apply
