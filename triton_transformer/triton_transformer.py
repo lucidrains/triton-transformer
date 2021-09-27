@@ -480,12 +480,11 @@ def layernorm_kernel_backward(
     output_ptr,
     dy_ptr,
     mean_centered_ptr,
-    inv_var_ptr,
     output_row_stride,
     dy_row_stride,
     mean_centered_row_stride,
-    inv_var_row_stride,
     n_cols,
+    eps,
     **meta
 ):
     row_idx = tl.program_id(0)
@@ -493,20 +492,20 @@ def layernorm_kernel_backward(
 
     dy_row_start_ptr = dy_ptr + row_idx * dy_row_stride
     mean_centered_row_start_ptr = mean_centered_ptr + row_idx * mean_centered_row_stride
-    inv_var_row_start_ptr = inv_var_ptr + row_idx * inv_var_row_stride
 
     col_offsets = tl.arange(0, BLOCK_SIZE)
     dy_ptrs = dy_row_start_ptr + col_offsets
     mean_centered_ptrs = mean_centered_row_start_ptr + col_offsets
-    inv_var_ptrs = inv_var_row_start_ptr + col_offsets
 
     mask = col_offsets < n_cols
 
     dy = tl.load(dy_ptrs, mask=mask, other=0.)
     mean_centered = tl.load(mean_centered_ptrs, mask=mask, other=0.)
-    inv_var = tl.load(inv_var_ptrs, mask=mask, other=0.)
 
+    row_var = tl.sum(mean_centered * mean_centered, axis = 0) / n_cols
+    inv_var = 1. / tl.sqrt(row_var + eps)
     normed = mean_centered * inv_var
+
     output = 1. / n_cols * inv_var * (n_cols * dy - tl.sum(dy, axis = 0) - normed * tl.sum(dy * normed, axis = 0))
 
     output_row_start_ptr = output_ptr + row_idx * output_row_stride
@@ -528,6 +527,9 @@ class _layernorm(autograd.Function):
         num_warps = calc_num_warps(BLOCK_SIZE)
 
         out = torch.empty_like(x)
+
+        ctx.training = training
+        ctx.eps = eps
 
         if training:
             scaled_x = torch.empty_like(x)
@@ -572,6 +574,8 @@ class _layernorm(autograd.Function):
 
     @classmethod
     def backward(cls, ctx, dy):
+        assert ctx.training, 'forward must be given with training flag of True'
+
         shape = dy.shape
         dim = shape[-1]
         dy = dy.view(-1, dim)
@@ -593,12 +597,11 @@ class _layernorm(autograd.Function):
             dx,
             dxhat,
             scaled_x,
-            inv_var,
             dx.stride(0),
             dxhat.stride(0),
             scaled_x.stride(0),
-            inv_var.stride(0),
             n_cols,
+            ctx.eps,
             num_warps = num_warps,
             BLOCK_SIZE = BLOCK_SIZE,
         )
