@@ -381,7 +381,7 @@ def cross_entropy_fn(logits, labels, ignore_index = 0., use_triton = False):
 def layernorm_kernel_forward_training(
     output_ptr,
     mean_centered_ptr,
-    inv_var_ptr,
+    normed_ptr,
     input_ptr,
     gamma_ptr,
     beta_ptr,
@@ -390,7 +390,7 @@ def layernorm_kernel_forward_training(
     beta_row_stride,
     output_row_stride,
     mean_centered_row_stride,
-    inv_var_row_stride,
+    normed_row_stride,
     n_cols,
     eps,
     **meta
@@ -428,9 +428,9 @@ def layernorm_kernel_forward_training(
     mean_centered_ptrs = mean_centered_row_start_ptr + col_offsets
     tl.store(mean_centered_ptrs, row_mean_centered, mask=mask)
 
-    inv_var_row_start_ptr = inv_var_ptr + row_idx * inv_var_row_stride
-    inv_var_ptrs = inv_var_row_start_ptr + col_offsets
-    tl.store(inv_var_ptrs, inv_var, mask=mask)
+    normed_row_start_ptr = normed_ptr + row_idx * normed_row_stride
+    normed_ptrs = normed_row_start_ptr + col_offsets
+    tl.store(normed_ptrs, normed, mask=mask)
 
 @triton.jit
 def layernorm_kernel_forward_inference(
@@ -533,12 +533,12 @@ class _layernorm(autograd.Function):
 
         if training:
             scaled_x = torch.empty_like(x)
-            inv_var = torch.empty_like(x)
+            normed = torch.empty_like(x)
 
             layernorm_kernel_forward_training[(n_rows,)](
                 out,
                 scaled_x,
-                inv_var,
+                normed,
                 x,
                 expanded_gamma,
                 expanded_beta,
@@ -547,13 +547,13 @@ class _layernorm(autograd.Function):
                 expanded_beta.stride(0),
                 out.stride(0),
                 scaled_x.stride(0),
-                inv_var.stride(0),
+                normed.stride(0),
                 n_cols,
                 eps,
                 num_warps = num_warps,
                 BLOCK_SIZE = BLOCK_SIZE,
             )
-            ctx.save_for_backward(scaled_x, gamma, inv_var)
+            ctx.save_for_backward(scaled_x, gamma, out)
         else:
             layernorm_kernel_forward_inference[(n_rows,)](
                 out,
@@ -580,10 +580,10 @@ class _layernorm(autograd.Function):
         dim = shape[-1]
         dy = dy.view(-1, dim)
 
-        scaled_x, gamma, inv_var = ctx.saved_tensors
+        scaled_x, gamma, normed = ctx.saved_tensors
 
         dbeta = dy.sum(dim = 0)
-        dgamma = (dy * scaled_x * inv_var).sum(dim = 0)
+        dgamma = (dy * normed).sum(dim = 0)
         dxhat = dy * gamma
 
         n_rows, n_cols = dy.shape
