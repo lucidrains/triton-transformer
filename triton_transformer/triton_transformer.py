@@ -512,6 +512,47 @@ def layernorm_kernel_backward(
     output_ptrs = output_row_start_ptr + col_offsets
     tl.store(output_ptrs, output, mask=mask)
 
+@triton.jit
+def layernorm_gamma_beta_kernel_backward(
+    dgamma_ptr,
+    dbeta_ptr,
+    norm_ptr,
+    dy_ptr,
+    norm_stride,
+    dy_stride,
+    n_rows,
+    n_cols,
+    **meta
+):
+    col_idx = tl.program_id(0)
+    BLOCK_SIZE = meta['BLOCK_SIZE']
+
+    col_offsets = tl.arange(0, BLOCK_SIZE)
+    col_range = col_idx * BLOCK_SIZE + col_offsets
+
+    mask = col_range < n_cols
+
+    dy_ptrs = dy_ptr + col_range
+    norm_ptrs = norm_ptr + col_range
+
+    dgamma = tl.zeros((BLOCK_SIZE,), dtype = tl.float32)
+    dbeta = tl.zeros((BLOCK_SIZE,), dtype = tl.float32)
+
+    for _ in range(n_rows):
+        dy = tl.load(dy_ptrs, mask = mask)
+        norm = tl.load(norm_ptrs, mask = mask)
+        dbeta = dbeta + dy
+        dgamma = dgamma + (dy * norm)
+
+        dy_ptrs = dy_ptrs + dy_stride
+        norm_ptrs = norm_ptrs + norm_stride
+
+    dgamma_ptrs = dgamma_ptr + col_range
+    dbeta_ptrs = dbeta_ptr + col_range
+
+    tl.store(dgamma_ptrs, dgamma, mask = mask)
+    tl.store(dbeta_ptrs, dbeta, mask = mask)
+
 class _layernorm(autograd.Function):
     @classmethod
     def forward(cls, ctx, x, gamma, beta, eps, training):
@@ -582,16 +623,32 @@ class _layernorm(autograd.Function):
 
         scaled_x, gamma, normed = ctx.saved_tensors
 
-        dbeta = dy.sum(dim = 0)
-        dgamma = (dy * normed).sum(dim = 0)
-        dxhat = dy * gamma
-
         n_rows, n_cols = dy.shape
+
+        GAMMA_BETA_BLOCK_SIZE = 32
+        gamma_beta_num_warps = 2
+
+        dbeta = torch.empty_like(gamma)
+        dgamma = torch.empty_like(gamma)
+
+        layernorm_gamma_beta_kernel_backward[(triton.cdiv(n_cols, GAMMA_BETA_BLOCK_SIZE),)](
+            dbeta,
+            dgamma,
+            normed,
+            dy,
+            normed.stride(0),
+            dy.stride(0),
+            n_rows,
+            n_cols,
+            num_warps = gamma_beta_num_warps,
+            BLOCK_SIZE = GAMMA_BETA_BLOCK_SIZE
+        )
+
+        dxhat = dy * gamma
+        dx = torch.empty_like(dy)
 
         BLOCK_SIZE = triton.next_power_of_2(n_cols)
         num_warps = calc_num_warps(BLOCK_SIZE)
-
-        dx = torch.empty_like(dy)
 
         layernorm_kernel_backward[(n_rows,)](
             dx,
