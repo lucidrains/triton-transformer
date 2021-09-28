@@ -553,7 +553,7 @@ class _layernorm(autograd.Function):
                 num_warps = num_warps,
                 BLOCK_SIZE = BLOCK_SIZE,
             )
-            ctx.save_for_backward(scaled_x, gamma, inv_var)
+            ctx.save_for_backward(scaled_x, gamma, out)
         else:
             layernorm_kernel_forward_inference[(n_rows,)](
                 out,
@@ -580,10 +580,10 @@ class _layernorm(autograd.Function):
         dim = shape[-1]
         dy = dy.view(-1, dim)
 
-        scaled_x, gamma, inv_var = ctx.saved_tensors
+        scaled_x, gamma, out = ctx.saved_tensors
 
         dbeta = dy.sum(dim = 0)
-        dgamma = (dy * scaled_x * inv_var).sum(dim = 0)
+        dgamma = (dy * out).sum(dim = 0)
         dxhat = dy * gamma
 
         n_rows, n_cols = dy.shape
