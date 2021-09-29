@@ -211,7 +211,8 @@ class _relu_squared(autograd.Function):
     @classmethod
     def forward(self, ctx, x, w, b):
         o = triton_bmm_with_bias(x, w, b, activation = relu_squared_activation)
-        ctx.save_for_backward(x, w, o)
+        if x.requires_grad:
+            ctx.save_for_backward(x, w, o)
         return o
 
     @classmethod
@@ -323,7 +324,8 @@ class _softmax(autograd.Function):
             BLOCK_SIZE = BLOCK_SIZE,
         )
 
-        ctx.save_for_backward(y)
+        if x.requires_grad:
+            ctx.save_for_backward(y)
         return y.view(*shape)
 
     @classmethod
@@ -557,7 +559,7 @@ def layernorm_gamma_beta_kernel_backward(
 
 class _layernorm(autograd.Function):
     @classmethod
-    def forward(cls, ctx, x, gamma, beta, eps, training):
+    def forward(cls, ctx, x, gamma, beta, eps):
         shape = x.shape
         dim = shape[-1]
         x = x.view(-1, dim)
@@ -571,10 +573,9 @@ class _layernorm(autograd.Function):
 
         out = torch.empty_like(x)
 
-        ctx.training = training
         ctx.eps = eps
 
-        if training:
+        if x.requires_grad:
             scaled_x = torch.empty_like(x)
             normed = torch.empty_like(x)
 
@@ -617,8 +618,6 @@ class _layernorm(autograd.Function):
 
     @classmethod
     def backward(cls, ctx, dy):
-        assert ctx.training, 'forward must be given with training flag of True'
-
         shape, device = dy.shape, dy.device
         dim = shape[-1]
         dy = dy.view(-1, dim)
@@ -674,11 +673,11 @@ class _layernorm(autograd.Function):
         )
 
         dx = dx.view(*shape)
-        return dx, dgamma, dbeta, None, None
+        return dx, dgamma, dbeta, None
 
-def layernorm(x, gamma, beta, eps = 1e-5, use_triton = False, training = False):
+def layernorm(x, gamma, beta, eps = 1e-5, use_triton = False):
     if use_triton:
-        out = _layernorm.apply(x, gamma, beta, eps, training)
+        out = _layernorm.apply(x, gamma, beta, eps)
     else:
         out = F.layer_norm(x, (x.shape[-1],), gamma, beta, eps = eps)
     return out
@@ -707,7 +706,7 @@ class Attention(nn.Module):
     def forward(self, x, mask = None, use_triton = None):
         use_triton = default(use_triton, self.use_triton)
         h = self.heads
-        x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = use_triton, training = self.training)
+        x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = use_triton)
 
         q, k, v = self.to_qkv(x).chunk(3, dim = -1)
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h = h), (q, k, v))
@@ -744,7 +743,7 @@ class FeedForward(nn.Module):
     def forward(self, x, use_triton = None):
         use_triton = default(use_triton, self.use_triton)
 
-        x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = use_triton, training = self.training)
+        x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = use_triton)
 
         x = fused_relu_squared(x, self.proj_in_weight, self.proj_in_bias, use_triton = use_triton)
         x = self.proj_out(x)
@@ -819,7 +818,7 @@ class Transformer(nn.Module):
             x = attn(x, mask = mask, use_triton = use_triton) + x
             x = ff(x, use_triton = use_triton) + x
 
-        x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = use_triton, training = self.training)
+        x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = use_triton)
         logits = self.to_logits(x)
 
         if not exists(labels):

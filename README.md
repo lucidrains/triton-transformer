@@ -24,6 +24,10 @@ Layernorm forwards and backwards
 
 <img src="./layernorm-forward-backward.png" width="400px"></img>
 
+Softmax forwards and backwards
+
+<img src="./softmax.png" width="400px"></img>
+
 ## Install
 
 ```bash
