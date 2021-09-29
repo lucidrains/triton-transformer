@@ -744,7 +744,7 @@ class FeedForward(nn.Module):
     def forward(self, x, use_triton = None):
         use_triton = default(use_triton, self.use_triton)
 
-        x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = False, training = self.training)
+        x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = use_triton, training = self.training)
 
         x = fused_relu_squared(x, self.proj_in_weight, self.proj_in_bias, use_triton = use_triton)
         x = self.proj_out(x)
