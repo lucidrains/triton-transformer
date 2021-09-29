@@ -7,10 +7,10 @@ Implementation of a Transformer, but completely in <a href="https://triton-lang.
 - [x] layernorm forward
 - [x] layernorm backwards
 - [x] batch matrix multiply + fused act forwards
+- [x] optimize layernorm backwards (figure out how much to store vs recompute)
 - [ ] batch matrix multiply + fused act backwards
 - [ ] fused attention (expand on softmax)
 - [ ] use triton matmul for other projections
-- [ ] optimize layernorm backwards (figure out how much to store vs recompute)
 - [ ] benchmark and optimize
 - [ ] kernels conditional on inference vs training
 
@@ -19,6 +19,10 @@ Implementation of a Transformer, but completely in <a href="https://triton-lang.
 Layernorm forward
 
 <img src="./layernorm.png" width="400px"></img>
+
+Layernorm forwards and backwards
+
+<img src="./layernorm-forward-backward.png" width="400px"></img>
 
 ## Install
 
