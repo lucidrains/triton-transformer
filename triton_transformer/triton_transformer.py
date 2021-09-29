@@ -512,6 +512,49 @@ def layernorm_kernel_backward(
     output_ptrs = output_row_start_ptr + col_offsets
     tl.store(output_ptrs, output, mask=mask)
 
+@triton.jit
+def layernorm_gamma_beta_kernel_backward(
+    dbeta_ptr,
+    dgamma_ptr,
+    norm_ptr,
+    dy_ptr,
+    norm_stride,
+    dy_stride,
+    dgamma_row_stride,
+    dbeta_row_stride,
+    n_rows,
+    n_cols,
+    **meta
+):
+    col_idx = tl.program_id(0)
+    row_idx = tl.program_id(1)
+    BLOCK_SIZE = meta['BLOCK_SIZE']
+    ROW_BLOCK_SIZE = meta['BLOCK_SIZE_ROW']
+
+    col_offsets = tl.arange(0, BLOCK_SIZE)
+    row_offsets = tl.arange(0, ROW_BLOCK_SIZE)
+
+    col_range = col_idx * BLOCK_SIZE + col_offsets
+    row_range = row_idx * ROW_BLOCK_SIZE + row_offsets
+
+    col_mask = col_range < n_cols
+    mask = (row_range < n_rows)[:, None] & col_mask[None, :]
+
+    dy_ptr += row_range[:, None] * dy_stride + col_range[None, :]
+    norm_ptr += row_range[:, None] * norm_stride + col_range[None, :]
+
+    dy = tl.load(dy_ptr, mask = mask, other = 0.)
+    norm = tl.load(norm_ptr, mask = mask, other = 0.)
+
+    dbeta = tl.sum(dy, axis = 0)
+    dgamma = tl.sum(dy * norm, axis = 0)
+
+    dgamma_ptr += row_idx * dgamma_row_stride + col_range
+    dbeta_ptr += row_idx * dbeta_row_stride + col_range
+
+    tl.store(dgamma_ptr, dgamma, mask = col_mask)
+    tl.store(dbeta_ptr, dbeta, mask = col_mask)
+
 class _layernorm(autograd.Function):
     @classmethod
     def forward(cls, ctx, x, gamma, beta, eps, training):
@@ -576,22 +619,46 @@ class _layernorm(autograd.Function):
     def backward(cls, ctx, dy):
         assert ctx.training, 'forward must be given with training flag of True'
 
-        shape = dy.shape
+        shape, device = dy.shape, dy.device
         dim = shape[-1]
         dy = dy.view(-1, dim)
 
         scaled_x, gamma, normed = ctx.saved_tensors
 
-        dbeta = dy.sum(dim = 0)
-        dgamma = (dy * normed).sum(dim = 0)
-        dxhat = dy * gamma
-
         n_rows, n_cols = dy.shape
+
+        GAMMA_BETA_BLOCK_SIZE = 64
+        GAMMA_BETA_ROW_BLOCK_SIZE = 64
+        num_col_programs = triton.cdiv(n_cols, GAMMA_BETA_BLOCK_SIZE)
+        num_row_programs = triton.cdiv(n_rows, GAMMA_BETA_ROW_BLOCK_SIZE)
+
+        dbeta = torch.empty((num_row_programs, n_cols), device = device)   # figure out how to dynamically allocate output shape based on block size chosen during autotune
+        dgamma = torch.empty((num_row_programs, n_cols), device = device)
+
+        layernorm_gamma_beta_kernel_backward[(num_col_programs, num_row_programs)](
+            dbeta,
+            dgamma,
+            normed,
+            dy,
+            normed.stride(0),
+            dy.stride(0),
+            dgamma.stride(0),
+            dbeta.stride(0),
+            n_rows,
+            n_cols,
+            num_warps = 4,
+            BLOCK_SIZE = GAMMA_BETA_BLOCK_SIZE,
+            BLOCK_SIZE_ROW = GAMMA_BETA_ROW_BLOCK_SIZE
+        )
+
+        dbeta = dbeta.sum(dim = 0)
+        dgamma = dgamma.sum(dim = 0)
+
+        dxhat = dy * gamma
+        dx = torch.empty_like(dy)
 
         BLOCK_SIZE = triton.next_power_of_2(n_cols)
         num_warps = calc_num_warps(BLOCK_SIZE)
-
-        dx = torch.empty_like(dy)
 
         layernorm_kernel_backward[(n_rows,)](
             dx,
