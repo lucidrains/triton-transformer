@@ -47,7 +47,8 @@ model = Transformer(
     dim = 512,
     depth = 6,
     heads = 8,
-    dim_head = 64
+    dim_head = 64,
+    use_triton = True # use this to turn on / off triton use
 )
 
 x = torch.randint(0, 256, (1, 1024))

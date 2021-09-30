@@ -1,1 +1,1 @@
-from triton_transformer.triton_transformer import Transformer
+from triton_transformer.transformer import Transformer
