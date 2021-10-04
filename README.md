@@ -52,12 +52,38 @@ model = Transformer(
     attn_dropout = 0.1,     # attention dropout
     ff_dropout = 0.1,       # feedforward dropout
     use_triton = True       # use this to turn on / off triton
-)
+).cuda()
 
-x = torch.randint(0, 256, (1, 1024))
-mask = torch.ones(1, 1024).bool()
+x = torch.randint(0, 256, (1, 1024)).cuda()
+mask = torch.ones(1, 1024).bool().cuda()
 
 logits = model(x, mask = mask) # (1, 1024, 256)
+```
+
+To train, just pass in the labels with the keyword `labels` on forward, and the cross entropy loss will be returned for backprop.
+
+ex. BERT
+
+```python
+import torch
+from triton_transformer import Transformer
+
+model = Transformer(
+    num_tokens = 20000,
+    max_seq_len = 512,
+    dim = 512,
+    depth = 12,
+    heads = 8,
+    dim_head = 64,
+    use_triton = True
+).cuda()
+
+x = torch.randint(0, 20000, (1, 512)).cuda()
+labels = torch.randint(0, 20000, (1, 512)).cuda()
+mask = torch.ones(1, 512).bool().cuda()
+
+loss = model(x, mask = mask, labels = labels)
+loss.backward()
 ```
 
 ## Test - GPT training
