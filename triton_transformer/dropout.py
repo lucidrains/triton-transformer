@@ -1,5 +1,6 @@
 # https://triton-lang.org/getting-started/tutorials/04-low-memory-dropout.html#sphx-glr-getting-started-tutorials-04-low-memory-dropout-py
 import torch
+from torch import autograd
 import torch.nn.functional as F
 import triton
 import triton.language as tl
@@ -48,6 +49,20 @@ def seeded_dropout(x, p, seed):
     _seeded_dropout[grid](x, output, n_elements, p, seed, BLOCK_SIZE = BLOCK_SIZE)
     return output
 
+class dropout_(autograd.Function):
+    @classmethod
+    def forward(cls, ctx, x, p):
+        seed = randrange(int(1e6))
+        ctx.p = p
+        ctx.seed = seed
+        return seeded_dropout(x, p, seed)
+
+    @classmethod
+    def backward(cls, ctx, dy):
+        p = ctx.p
+        seed = ctx.seed
+        return seeded_dropout(dy, p, seed), None
+
 def dropout_fn(x, p, use_triton = False):
     if p == 0. or not x.requires_grad:
         return x
@@ -55,5 +70,4 @@ def dropout_fn(x, p, use_triton = False):
     if not use_triton:
         return F.dropout(x, p, training = True)
 
-    seed = randrange(int(1e6))
-    return seeded_dropout(x, p, seed)
+    return dropout_.apply(x, p)
