@@ -7,6 +7,7 @@ from triton_transformer.layernorm import layernorm
 from triton_transformer.softmax import softmax
 from triton_transformer.cross_entropy import cross_entropy_fn
 from triton_transformer.bmm import fused_relu_squared
+from triton_transformer.dropout import dropout_fn
 
 from triton_transformer.utils import exists, default
 
@@ -18,6 +19,7 @@ class Attention(nn.Module):
         dim,
         dim_head = 64,
         heads = 8,
+        dropout = 0.,
         use_triton = False
     ):
         super().__init__()
@@ -25,9 +27,9 @@ class Attention(nn.Module):
         self.heads = heads
         self.scale = dim_head ** -0.5
         inner_dim = dim_head * heads
+        self.dropout = dropout
 
         self.norm = nn.LayerNorm(dim)
-
         self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
         self.to_out = nn.Linear(inner_dim, dim)
 
@@ -47,23 +49,26 @@ class Attention(nn.Module):
             sim = sim.masked_fill(mask, mask_value)
 
         attn = softmax(sim, use_triton = use_triton)
+        attn = dropout_fn(attn, self.dropout, use_triton = use_triton)
 
         out = einsum('b i j, b j d -> b i d', attn, v)
         out = rearrange(out, '(b h) n d -> b n (h d)', h = h)
-        return self.to_out(out)
+        out = self.to_out(out)
+        return dropout_fn(out, self.dropout, use_triton = use_triton)
 
 class FeedForward(nn.Module):
     def __init__(
         self,
         dim,
         mult = 4,
+        dropout = 0.,
         use_triton = False
     ):
         super().__init__()
         self.use_triton = use_triton
         inner_dim = dim * mult
+        self.dropout = dropout
         self.norm = nn.LayerNorm(dim)
-
         self.proj_in_weight = nn.Parameter(torch.randn(dim, inner_dim))
         self.proj_in_bias = nn.Parameter(torch.randn(inner_dim))
         self.proj_out = nn.Linear(inner_dim, dim)
@@ -74,6 +79,8 @@ class FeedForward(nn.Module):
         x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = use_triton)
 
         x = fused_relu_squared(x, self.proj_in_weight, self.proj_in_bias, use_triton = use_triton)
+        x = dropout_fn(x, self.dropout, use_triton = use_triton)
+
         x = self.proj_out(x)
         return x
 
@@ -90,6 +97,8 @@ class Transformer(nn.Module):
         causal = False,
         heads = 8,
         dim_head = 64,
+        ff_dropout = 0.,
+        attn_dropout = 0.,
         use_triton = False
     ):
         super().__init__()
@@ -100,8 +109,8 @@ class Transformer(nn.Module):
         self.layers = nn.ModuleList([])
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                Attention(dim, heads = heads, dim_head = dim_head, use_triton = use_triton),
-                FeedForward(dim, use_triton = use_triton)
+                Attention(dim, heads = heads, dim_head = dim_head, dropout = attn_dropout, use_triton = use_triton),
+                FeedForward(dim, dropout = ff_dropout, use_triton = use_triton)
             ]))
 
         self.norm = nn.LayerNorm(dim)
