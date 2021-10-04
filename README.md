@@ -8,7 +8,7 @@ Implementation of a Transformer, but completely in <a href="https://triton-lang.
 - [x] layernorm backwards
 - [x] batch matrix multiply + fused act forwards
 - [x] optimize layernorm backwards (figure out how much to store vs recompute)
-- [ ] use memory efficient dropout from Triton tutorials
+- [x] use memory efficient dropout from Triton tutorials
 - [ ] batch matrix multiply + fused act backwards
 - [ ] fused attention (expand on softmax)
 - [ ] use triton matmul for other projections
