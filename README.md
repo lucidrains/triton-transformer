@@ -42,13 +42,16 @@ import torch
 from triton_transformer import Transformer
 
 model = Transformer(
-    num_tokens = 256,
-    max_seq_len = 1024,
-    dim = 512,
-    depth = 6,
-    heads = 8,
-    dim_head = 64,
-    use_triton = True # use this to turn on / off triton use
+    num_tokens = 256,       # vocab size
+    max_seq_len = 1024,     # maximum sequence length
+    dim = 512,              # dimension
+    depth = 6,              # depth
+    heads = 8,              # number of heads
+    dim_head = 64,          # dimension per head
+    causal = True,          # autoregressive or not
+    attn_dropout = 0.1,     # attention dropout
+    ff_dropout = 0.1,       # feedforward dropout
+    use_triton = True       # use this to turn on / off triton
 )
 
 x = torch.randint(0, 256, (1, 1024))
