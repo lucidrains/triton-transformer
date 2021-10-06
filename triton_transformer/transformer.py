@@ -1,3 +1,4 @@
+from functools import partial
 import torch
 from torch import nn, einsum
 import torch.nn.functional as F
@@ -11,6 +12,20 @@ from triton_transformer.dropout import dropout_fn
 
 from triton_transformer.utils import exists, default
 
+# classes
+
+class PreNormResidual(nn.Module):
+    def __init__(self, dim, fn, use_triton = False):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim)
+        self.fn = fn
+        self.use_triton = use_triton
+
+    def forward(self, x, **kwargs):
+        use_triton = kwargs.get('use_triton', self.use_triton)
+        normed = layernorm(x, self.norm.weight, self.norm.bias, use_triton = use_triton)
+        return self.fn(normed, **kwargs) + x
+
 # helpers classes
 
 class Attention(nn.Module):
@@ -19,6 +34,7 @@ class Attention(nn.Module):
         dim,
         dim_head = 64,
         heads = 8,
+        causal = False,
         dropout = 0.,
         use_triton = False
     ):
@@ -26,6 +42,7 @@ class Attention(nn.Module):
         self.use_triton = use_triton
         self.heads = heads
         self.scale = dim_head ** -0.5
+        self.causal = causal
         inner_dim = dim_head * heads
         self.dropout = dropout
 
@@ -36,7 +53,6 @@ class Attention(nn.Module):
     def forward(self, x, mask = None, use_triton = None):
         use_triton = default(use_triton, self.use_triton)
         h = self.heads
-        x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = use_triton)
 
         q, k, v = self.to_qkv(x).chunk(3, dim = -1)
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h = h), (q, k, v))
@@ -48,7 +64,7 @@ class Attention(nn.Module):
             mask_value = -torch.finfo(sim.dtype).max
             sim = sim.masked_fill(mask, mask_value)
 
-        attn = softmax(sim, use_triton = use_triton)
+        attn = softmax(sim, causal = self.causal, use_triton = use_triton)
         attn = dropout_fn(attn, self.dropout, use_triton = use_triton)
 
         out = einsum('b i j, b j d -> b i d', attn, v)
@@ -75,8 +91,6 @@ class FeedForward(nn.Module):
 
     def forward(self, x, use_triton = None):
         use_triton = default(use_triton, self.use_triton)
-
-        x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = use_triton)
 
         x = fused_relu_squared(x, self.proj_in_weight, self.proj_in_bias, use_triton = use_triton)
         x = dropout_fn(x, self.dropout, use_triton = use_triton)
@@ -107,10 +121,12 @@ class Transformer(nn.Module):
         self.pos_emb = nn.Embedding(max_seq_len, dim)
 
         self.layers = nn.ModuleList([])
+        wrapper = partial(PreNormResidual, dim)
+
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                Attention(dim, heads = heads, dim_head = dim_head, dropout = attn_dropout, use_triton = use_triton),
-                FeedForward(dim, dropout = ff_dropout, use_triton = use_triton)
+                wrapper(Attention(dim, heads = heads, dim_head = dim_head, causal = causal, dropout = attn_dropout, use_triton = use_triton)),
+                wrapper(FeedForward(dim, dropout = ff_dropout, use_triton = use_triton))
             ]))
 
         self.norm = nn.LayerNorm(dim)
@@ -142,18 +158,20 @@ class Transformer(nn.Module):
 
         # generate mask, depending on whether autoregressive or not
 
-        if self.causal:
+        assert not (self.causal and exists(mask)), 'mask is not needed during autoregressive mode'
+
+        if self.causal and not use_triton:
             mask = self.mask[:n, :n]
             mask = rearrange(mask, 'i j -> () i j')
-        elif exists(mask):
+        elif not self.causal and exists(mask):
             mask = rearrange(mask, 'b i -> b i ()') * rearrange(mask, 'b j -> b () j')
             mask = ~mask
 
         # go through layers
 
         for attn, ff in self.layers:
-            x = attn(x, mask = mask, use_triton = use_triton) + x
-            x = ff(x, use_triton = use_triton) + x
+            x = attn(x, mask = mask, use_triton = use_triton)
+            x = ff(x, use_triton = use_triton)
 
         x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = use_triton)
         logits = self.to_logits(x)

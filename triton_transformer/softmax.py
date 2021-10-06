@@ -20,6 +20,7 @@ def softmax_kernel_forward(
     input_row_stride,
     output_row_stride,
     n_cols,
+    causal,
     **meta
 ):
     row_idx = tl.program_id(0)
@@ -30,7 +31,13 @@ def softmax_kernel_forward(
     col_offsets = tl.arange(0, BLOCK_SIZE)
     input_ptrs = row_start_ptr + col_offsets
 
-    row = tl.load(input_ptrs, mask=col_offsets < n_cols, other=-float('inf'))
+    mask = col_offsets < n_cols
+
+    row = tl.load(input_ptrs, mask = mask, other = -float('inf'))
+
+    if causal:
+        causal_mask = col_offsets > (row_idx % n_cols)
+        row = row + tl.where(causal_mask, -float('inf'), 0.)
 
     row_minus_max = row - tl.max(row, axis=0)
 
@@ -40,7 +47,7 @@ def softmax_kernel_forward(
 
     output_row_start_ptr = output_ptr + row_idx * output_row_stride
     output_ptrs = output_row_start_ptr + col_offsets
-    tl.store(output_ptrs, softmax_output, mask=col_offsets < n_cols)
+    tl.store(output_ptrs, softmax_output, mask = mask)
 
 @triton.jit
 def softmax_kernel_backward(
@@ -63,19 +70,21 @@ def softmax_kernel_backward(
     input_ptrs = row_start_ptr + col_offsets
     grad_ptrs = grad_row_start_ptr + col_offsets
 
-    probs_row = tl.load(input_ptrs, mask = col_offsets < n_cols, other = 0.)
-    grad_row = tl.load(grad_ptrs, mask = col_offsets < n_cols, other = 0.)
+    mask = col_offsets < n_cols
+
+    probs_row = tl.load(input_ptrs, mask = mask, other = 0.)
+    grad_row = tl.load(grad_ptrs, mask = mask, other = 0.)
 
     dxhat = probs_row * grad_row
     softmax_grad_output = dxhat - probs_row * tl.sum(dxhat, axis = 0)
 
     output_row_start_ptr = output_ptr + row_idx * output_row_stride
     output_ptrs = output_row_start_ptr + col_offsets
-    tl.store(output_ptrs, softmax_grad_output, mask = col_offsets < n_cols)
+    tl.store(output_ptrs, softmax_grad_output, mask = mask)
 
 class _softmax(autograd.Function):
     @classmethod
-    def forward(self, ctx, x):
+    def forward(self, ctx, x, causal):
         shape = x.shape
         x = x.view(-1, shape[-1])
         n_rows, n_cols = x.shape
@@ -91,6 +100,7 @@ class _softmax(autograd.Function):
             x.stride(0),
             y.stride(0),
             n_cols,
+            causal,
             num_warps = num_warps,
             BLOCK_SIZE = BLOCK_SIZE,
         )
@@ -124,12 +134,12 @@ class _softmax(autograd.Function):
             BLOCK_SIZE = BLOCK_SIZE
         )
 
-        return dx.view(*shape)
+        return dx.view(*shape), None
 
 triton_softmax = _softmax.apply
 
-def softmax(x, use_triton = False):
+def softmax(x, causal = False, use_triton = False):
     if use_triton:
-        return triton_softmax(x)
+        return triton_softmax(x, causal)
     else:
         return F.softmax(x, dim = -1)
