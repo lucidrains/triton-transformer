@@ -84,7 +84,6 @@ class FeedForward(nn.Module):
         self.use_triton = use_triton
         inner_dim = dim * mult
         self.dropout = dropout
-        self.norm = nn.LayerNorm(dim)
         self.proj_in_weight = nn.Parameter(torch.randn(dim, inner_dim))
         self.proj_in_bias = nn.Parameter(torch.randn(inner_dim))
         self.proj_out = nn.Linear(inner_dim, dim)
@@ -112,6 +111,7 @@ class Transformer(nn.Module):
         heads = 8,
         dim_head = 64,
         ff_dropout = 0.,
+        ff_mult = 4,
         attn_dropout = 0.,
         use_triton = False
     ):
@@ -126,7 +126,7 @@ class Transformer(nn.Module):
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
                 wrapper(Attention(dim, heads = heads, dim_head = dim_head, causal = causal, dropout = attn_dropout, use_triton = use_triton)),
-                wrapper(FeedForward(dim, dropout = ff_dropout, use_triton = use_triton))
+                wrapper(FeedForward(dim, dropout = ff_dropout, mult = ff_mult, use_triton = use_triton))
             ]))
 
         self.norm = nn.LayerNorm(dim)
