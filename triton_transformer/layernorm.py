@@ -27,6 +27,7 @@ def layernorm_kernel_forward_training(
     mean_centered_row_stride,
     normed_row_stride,
     n_cols,
+    stable,
     eps,
     **meta
 ):
@@ -46,6 +47,10 @@ def layernorm_kernel_forward_training(
     row = tl.load(input_ptrs, mask=mask, other=0.)
     gammas = tl.load(gamma_ptrs, mask=mask, other=0.)
     betas = tl.load(beta_ptrs, mask=mask, other=0.)
+
+    if stable:
+        row_max = tl.max(tl.where(mask, row, float('-inf')), axis = 0)
+        row /= row_max
 
     row_mean = tl.sum(row, axis = 0) / n_cols
     row_mean_centered = tl.where(mask, row - row_mean, 0.)
@@ -78,6 +83,7 @@ def layernorm_kernel_forward_inference(
     beta_row_stride,
     output_row_stride,
     n_cols,
+    stable,
     eps,
     **meta
 ):
@@ -97,6 +103,10 @@ def layernorm_kernel_forward_inference(
     row = tl.load(input_ptrs, mask=mask, other=0.)
     gammas = tl.load(gamma_ptrs, mask=mask, other=0.)
     betas = tl.load(beta_ptrs, mask=mask, other=0.)
+
+    if stable:
+        row_max = tl.max(tl.where(mask, row, float('-inf')), axis = 0)
+        row /= row_max
 
     row_mean = tl.sum(row, axis = 0) / n_cols
     row_mean_centered = tl.where(mask, row - row_mean, 0.)
@@ -192,7 +202,7 @@ def layernorm_gamma_beta_kernel_backward(
 
 class _layernorm(autograd.Function):
     @classmethod
-    def forward(cls, ctx, x, gamma, beta, eps):
+    def forward(cls, ctx, x, gamma, beta, eps, stable):
         shape = x.shape
         dim = shape[-1]
         x = x.view(-1, dim)
@@ -226,6 +236,7 @@ class _layernorm(autograd.Function):
                 scaled_x.stride(0),
                 normed.stride(0),
                 n_cols,
+                stable,
                 eps,
                 num_warps = num_warps,
                 BLOCK_SIZE = BLOCK_SIZE,
@@ -242,6 +253,7 @@ class _layernorm(autograd.Function):
                 expanded_beta.stride(0),
                 out.stride(0),
                 n_cols,
+                stable,
                 eps,
                 num_warps = num_warps,
                 BLOCK_SIZE = BLOCK_SIZE,
@@ -304,11 +316,13 @@ class _layernorm(autograd.Function):
         )
 
         dx = dx.view(*shape)
-        return dx, dgamma, dbeta, None
+        return dx, dgamma, dbeta, None, None
 
-def layernorm(x, gamma, beta, eps = 1e-5, use_triton = False):
+def layernorm(x, gamma, beta, eps = 1e-5, use_triton = False, stable = False):
     if use_triton:
-        out = _layernorm.apply(x, gamma, beta, eps)
+        out = _layernorm.apply(x, gamma, beta, eps, stable)
     else:
+        if stable:
+            x = x / torch.amax(x, dim = -1, keepdim = True)
         out = F.layer_norm(x, (x.shape[-1],), gamma, beta, eps = eps)
     return out

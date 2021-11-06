@@ -173,7 +173,7 @@ class Transformer(nn.Module):
             x = attn(x, mask = mask, use_triton = use_triton)
             x = ff(x, use_triton = use_triton)
 
-        x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = use_triton)
+        x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = use_triton, stable = True)
         logits = self.to_logits(x)
 
         if not exists(labels):
