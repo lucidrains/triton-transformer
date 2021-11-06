@@ -48,7 +48,7 @@ def layernorm_kernel_forward_training(
     betas = tl.load(beta_ptrs, mask=mask, other=0.)
 
     row_mean = tl.sum(row, axis = 0) / n_cols
-    row_mean_centered = row - row_mean
+    row_mean_centered = tl.where(mask, row - row_mean, 0.)
     row_var = tl.sum(row_mean_centered * row_mean_centered, axis = 0) / n_cols
     inv_var = 1. / tl.sqrt(row_var + eps)
     normed = row_mean_centered * inv_var
@@ -99,7 +99,7 @@ def layernorm_kernel_forward_inference(
     betas = tl.load(beta_ptrs, mask=mask, other=0.)
 
     row_mean = tl.sum(row, axis = 0) / n_cols
-    row_mean_centered = row - row_mean
+    row_mean_centered = tl.where(mask, row - row_mean, 0.)
     row_var = tl.sum(row_mean_centered * row_mean_centered, axis = 0) / n_cols
     inv_var = 1. / tl.sqrt(row_var + eps)
     normed = row_mean_centered * inv_var
