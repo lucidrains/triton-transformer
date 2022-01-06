@@ -2,19 +2,6 @@
 
 Implementation of a Transformer, but completely in <a href="https://triton-lang.org/">Triton</a>. I'm completely new to lower-level neural net code, so this repository will mostly be a learning experience, with the end-goal being a vanilla transformer that is faster and more efficient to train.
 
-- [x] softmax
-- [x] cross-entropy (using triton ops)
-- [x] layernorm forward
-- [x] layernorm backwards
-- [x] batch matrix multiply + fused act forwards
-- [x] optimize layernorm backwards (figure out how much to store vs recompute)
-- [x] use memory efficient dropout from Triton tutorials
-- [ ] batch matrix multiply + fused act backwards
-- [ ] fused attention (expand on softmax)
-- [ ] use triton matmul for other projections
-- [ ] benchmark and optimize
-- [ ] kernels conditional on inference vs training
-
 ## Results
 
 Layernorm forward
@@ -91,6 +78,22 @@ loss.backward()
 ```bash
 $ python train.py
 ```
+
+## Todo
+
+- [x] softmax
+- [x] cross-entropy (using triton ops)
+- [x] layernorm forward
+- [x] layernorm backwards
+- [x] batch matrix multiply + fused act forwards
+- [x] optimize layernorm backwards (figure out how much to store vs recompute)
+- [x] use memory efficient dropout from Triton tutorials
+- [ ] batch matrix multiply + fused act backwards
+- [ ] fused attention (expand on softmax)
+- [ ] use triton matmul for other projections
+- [ ] benchmark and optimize
+- [ ] kernels conditional on inference vs training
+- [ ] efficient triangular matmul kernel for causal attention
 
 ## Citations
 
