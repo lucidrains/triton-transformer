@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 'triton-transformer',
   packages = find_packages(),
-  version = '0.0.27',
+  version = '0.0.28',
   license='MIT',
   description = 'Transformer in Triton',
   author = 'Phil Wang',
@@ -17,7 +17,7 @@ setup(
   install_requires=[
     'einops',
     'torch>=1.6',
-    'triton>=1.0.1dev'
+    'triton==1.0.1.dev20210924'
   ],
   classifiers=[
     'Development Status :: 4 - Beta',
