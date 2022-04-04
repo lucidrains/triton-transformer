@@ -127,3 +127,11 @@ $ python train.py
     primaryClass = {cs.LG}
 }
 ```
+
+```bibtex
+@article{chowdhery2022PaLM,
+  title   = {PaLM: Scaling Language Modeling with Pathways},
+  author  = {Chowdhery, Aakanksha et al},
+  year    = {2022}
+}
+```

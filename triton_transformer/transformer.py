@@ -23,7 +23,7 @@ class PreNormResidual(nn.Module):
 
     def forward(self, x, **kwargs):
         use_triton = kwargs.get('use_triton', self.use_triton)
-        normed = layernorm(x, self.norm.weight, self.norm.bias, use_triton = use_triton)
+        normed = layernorm(x, self.norm.weight, use_triton = use_triton)
         return self.fn(normed, **kwargs) + x
 
 # helpers classes
@@ -48,7 +48,7 @@ class Attention(nn.Module):
 
         self.norm = nn.LayerNorm(dim)
         self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
-        self.to_out = nn.Linear(inner_dim, dim)
+        self.to_out = nn.Linear(inner_dim, dim, bias = False)
 
     def forward(self, x, mask = None, use_triton = None):
         use_triton = default(use_triton, self.use_triton)
@@ -85,13 +85,12 @@ class FeedForward(nn.Module):
         inner_dim = dim * mult
         self.dropout = dropout
         self.proj_in_weight = nn.Parameter(torch.randn(dim, inner_dim))
-        self.proj_in_bias = nn.Parameter(torch.randn(inner_dim))
         self.proj_out = nn.Linear(inner_dim, dim)
 
     def forward(self, x, use_triton = None):
         use_triton = default(use_triton, self.use_triton)
 
-        x = fused_relu_squared(x, self.proj_in_weight, self.proj_in_bias, use_triton = use_triton)
+        x = fused_relu_squared(x, self.proj_in_weight, use_triton = use_triton)
         x = dropout_fn(x, self.dropout, use_triton = use_triton)
 
         x = self.proj_out(x)
@@ -173,7 +172,7 @@ class Transformer(nn.Module):
             x = attn(x, mask = mask, use_triton = use_triton)
             x = ff(x, use_triton = use_triton)
 
-        x = layernorm(x, self.norm.weight, self.norm.bias, use_triton = use_triton, stable = True)
+        x = layernorm(x, self.norm.weight, use_triton = use_triton, stable = True)
         logits = self.to_logits(x)
 
         if not exists(labels):
