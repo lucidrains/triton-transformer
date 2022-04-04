@@ -42,9 +42,7 @@ model = Transformer(
 ).cuda()
 
 x = torch.randint(0, 256, (1, 1024)).cuda()
-mask = torch.ones(1, 1024).bool().cuda()
-
-logits = model(x, mask = mask) # (1, 1024, 256)
+logits = model(x) # (1, 1024, 256)
 ```
 
 To train, just pass in the labels with the keyword `labels` on forward, and the cross entropy loss will be returned for backprop.
