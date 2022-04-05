@@ -46,7 +46,6 @@ class Attention(nn.Module):
         inner_dim = dim_head * heads
         self.dropout = dropout
 
-        self.norm = nn.LayerNorm(dim)
         self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
         self.to_out = nn.Linear(inner_dim, dim, bias = False)
 
